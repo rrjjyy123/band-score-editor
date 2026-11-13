@@ -1,0 +1,807 @@
+:root {
+  --bg: #f4f2ee;
+  --panel: #ffffff;
+  --ink: #1f2328;
+  --muted: #6b7078;
+  --line: #dcd8d0;
+  --accent: #d3542b;
+  --accent-soft: #fbe6dd;
+  --ok: #2f7d4a;
+  --warn: #c0392b;
+  --cursor: rgba(211, 84, 43, 0.18);
+  --cursor-edge: #d3542b;
+  font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--ink);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+body {
+  display: grid;
+  grid-template-rows: auto auto 1fr auto auto;
+}
+
+button,
+select,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+button:hover {
+  border-color: var(--accent);
+}
+button.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--ink);
+  color: #fff;
+}
+.topbar button {
+  background: transparent;
+  border-color: #474c54;
+  color: #fff;
+}
+.topbar button:hover {
+  border-color: var(--accent);
+}
+.brand {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.menu {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.sep {
+  width: 1px;
+  height: 20px;
+  background: #474c54;
+  margin: 0 4px;
+}
+.palette .sep {
+  background: var(--line);
+}
+.file-name {
+  margin-left: auto;
+  color: #b9bec6;
+  font-size: 13px;
+}
+
+.palette {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 6px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.palette button {
+  padding: 3px 8px;
+  font-size: 13px;
+}
+.palette .label {
+  color: var(--muted);
+  font-size: 12px;
+  margin-right: 2px;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: 290px 1fr;
+  min-height: 0;
+}
+
+.tracks {
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  padding: 8px;
+}
+.track {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+.track[draggable='true'] {
+  cursor: grab;
+}
+.track.dragging {
+  opacity: 0.45;
+}
+#tracks .track.drop-before {
+  box-shadow: 0 -3px 0 0 var(--accent);
+}
+#tracks .track.drop-after {
+  box-shadow: 0 3px 0 0 var(--accent);
+}
+.track.current {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.track-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.track-name {
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.track-kind {
+  font-size: 11px;
+  color: var(--muted);
+}
+.track-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+.track-row button {
+  padding: 2px 7px;
+  font-size: 12px;
+}
+.track-row input[type='range'] {
+  flex: 1;
+  min-width: 60px;
+}
+.track-row select {
+  font-size: 12px;
+  padding: 2px;
+}
+
+.viewport {
+  overflow: auto;
+  position: relative;
+  background: #e9e6e0;
+}
+.score-wrap {
+  position: relative;
+  background: #fff;
+  margin: 16px auto;
+  max-width: 1100px;
+  min-height: 400px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+.edit-cursor {
+  position: absolute;
+  pointer-events: none;
+  background: var(--cursor);
+  border: 2px solid var(--cursor-edge);
+  border-radius: 3px;
+  z-index: 5;
+}
+.edit-cursor .string-mark {
+  position: absolute;
+  left: -6px;
+  right: -6px;
+  height: 0;
+  border-top: 3px solid var(--cursor-edge);
+}
+.bar-warn {
+  position: absolute;
+  pointer-events: none;
+  border-bottom: 3px solid var(--warn);
+  z-index: 4;
+}
+
+/* alphaTab 재생 커서 */
+.at-cursor-bar {
+  background: rgba(64, 120, 220, 0.12);
+}
+.at-cursor-beat {
+  background: rgba(64, 120, 220, 0.75);
+  width: 3px;
+}
+.at-highlight * {
+  fill: #2f6fd8;
+  stroke: #2f6fd8;
+}
+.at-selection div {
+  background: rgba(64, 120, 220, 0.15);
+}
+
+.player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.player .time {
+  font-variant-numeric: tabular-nums;
+  min-width: 110px;
+  color: var(--muted);
+}
+.player label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.player .play {
+  min-width: 70px;
+  font-weight: 600;
+}
+.player .bpm {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.player .bpm input {
+  width: 56px;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: center;
+}
+.player .bpm > button:not(.link) {
+  width: 28px;
+  padding: 2px 0;
+}
+.player .bpm .link {
+  border: none;
+  background: none;
+  color: var(--accent, #2f6fd8);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.status {
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 16px;
+}
+.status .warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 80px;
+  transform: translateX(-50%);
+  background: var(--ink);
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 8px;
+  z-index: 50;
+  max-width: 80vw;
+}
+
+dialog {
+  border: none;
+  border-radius: 10px;
+  padding: 20px;
+  min-width: 380px;
+  max-width: 640px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+}
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.35);
+}
+dialog h2 {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+dialog .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+dialog .field > span {
+  font-size: 12px;
+  color: var(--muted);
+}
+dialog .check {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin: 4px 0;
+}
+dialog .actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+dialog .actions .primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+dialog table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+dialog td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--line);
+}
+dialog kbd {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 5px;
+  font-family: inherit;
+}
+dialog .note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 원본 보기: 인식 결과 옆에 원본 쪽을 나란히 */
+.workspace.with-source {
+  grid-template-columns: 290px minmax(0, 1.25fr) minmax(320px, 1fr);
+}
+.source {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--line);
+  background: #d9d5cd;
+}
+.source[hidden] {
+  display: none;
+}
+.source-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.source-head b {
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.source-head .hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+.source-head .grow {
+  flex: 1;
+}
+.source-head button {
+  padding: 2px 9px;
+}
+.source-pages {
+  flex: 1;
+  overflow: auto;
+  padding: 10px;
+}
+.source-page {
+  position: relative;
+  width: calc(100% * var(--source-zoom, 1));
+  margin: 0 auto 10px;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+}
+.source-page img {
+  display: block;
+  width: 100%;
+  user-select: none;
+}
+.source-mark {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: rgba(255, 214, 64, 0.22);
+  border-top: 2px solid var(--accent);
+  border-bottom: 2px solid var(--accent);
+  pointer-events: none;
+  transition: top 0.15s, height 0.15s;
+}
+.status button.link {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--warn);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+@media print {
+  .source,
+  .topbar,
+  .palette,
+  .tracks,
+  .player,
+  .status,
+  .edit-cursor,
+  .bar-warn,
+  .at-cursor-bar,
+  .at-cursor-beat {
+    display: none !important;
+  }
+  html,
+  body {
+    overflow: visible;
+    height: auto;
+    display: block;
+    background: #fff;
+  }
+  .workspace {
+    display: block;
+  }
+  .viewport {
+    overflow: visible;
+    background: #fff;
+  }
+  .score-wrap {
+    box-shadow: none;
+    margin: 0;
+    max-width: none;
+  }
+}
+
+/* ---- 상단 펼침 메뉴 ---- */
+.dd {
+  position: relative;
+}
+.dd-btn {
+  font-weight: 600;
+}
+.dd-list {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 50;
+  min-width: 260px;
+  padding: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+.dd.open .dd-list {
+  display: block;
+}
+.topbar .dd-list button,
+.popup button {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  gap: 16px;
+  border: none;
+  background: none;
+  color: var(--ink);
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: 5px;
+}
+.topbar .dd-list button:hover,
+.popup button:hover {
+  background: var(--accent-soft);
+}
+.dd-list kbd,
+.popup kbd {
+  color: var(--muted);
+  font-size: 12px;
+  font-family: inherit;
+}
+.dd-list hr,
+.popup hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 4px 0;
+}
+.dd-recent:not(:empty)::before {
+  content: '최근 파일';
+  display: block;
+  padding: 6px 10px 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.dd-recent button {
+  font-size: 13px;
+}
+.topbar .icon {
+  min-width: 34px;
+  font-size: 17px;
+  padding: 2px 8px;
+}
+
+/* ---- 트랙 '⋯' 메뉴 등 작은 메뉴 ---- */
+.popup {
+  position: fixed;
+  z-index: 60;
+  min-width: 200px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+.popup .label {
+  padding: 6px 10px 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.popup button.on {
+  background: var(--accent-soft);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* ---- 끌어다 놓기 ---- */
+.drop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  padding: 60px;
+  background: rgba(31, 35, 40, 0.55);
+}
+.drop[hidden] {
+  display: none;
+}
+.drop-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  border: 3px dashed #fff;
+  border-radius: 16px;
+  color: #fff;
+  font-size: 15px;
+  line-height: 1.6;
+}
+.drop-zone b {
+  font-size: 24px;
+}
+.drop-zone.over {
+  background: rgba(211, 84, 43, 0.45);
+  border-style: solid;
+}
+
+/* ---- 악보 위 글자 바로 고치기 ---- */
+.inline-edit {
+  position: fixed;
+  z-index: 70;
+  border: 2px solid var(--accent);
+  border-radius: 4px;
+  padding: 2px 6px;
+  background: #fff;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+#score text {
+  cursor: text;
+}
+
+/* ---- 팔레트 묶음 ---- */
+.palette .group {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.palette .kind-label {
+  font-weight: 600;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+/* ---- 트랙 칸 ---- */
+.track-head .more {
+  margin-left: auto;
+  padding: 0 8px;
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+/* ---- 상태줄 확대 ---- */
+.status .zoom {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.status .zoom input {
+  width: 110px;
+}
+.status-info {
+  display: flex;
+  gap: 16px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.bar-sel {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(47, 111, 216, 0.14);
+  border: 1px solid rgba(47, 111, 216, 0.5);
+}
+
+/* 곡 구조 맞추기 */
+dialog.wide {
+  max-width: min(1100px, 96vw);
+  width: 96vw;
+}
+.form-grid {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin: 8px 0;
+}
+.form-grid table {
+  width: auto;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.form-grid th,
+.form-grid td {
+  min-width: 34px;
+  padding: 2px 3px;
+  text-align: center;
+  font-size: 12px;
+  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+}
+.form-grid thead th {
+  font-weight: normal;
+  vertical-align: top;
+}
+.form-grid thead th span {
+  display: block;
+  font-weight: bold;
+}
+.form-grid thead th small {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.form-grid th.name {
+  position: sticky;
+  left: 0;
+  background: var(--panel);
+  min-width: 72px;
+  text-align: left;
+  z-index: 1;
+}
+.form-grid td {
+  cursor: pointer;
+}
+.form-grid td.good,
+.legend .good {
+  background: #dcefe2;
+}
+.form-grid td.fair,
+.legend .fair {
+  background: #f8eccb;
+}
+.form-grid td.poor,
+.legend .poor {
+  background: #f6d5cf;
+}
+.form-grid td.none,
+.legend .none {
+  background: #eceae6;
+  color: var(--muted);
+}
+.form-grid td.edited {
+  background: #dbe7f6;
+}
+.form-grid td.sel {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.legend {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.legend i {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  margin-left: 6px;
+}
+.form-tools {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.form-tools .hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin-right: 4px;
+}
+
+ul.note {
+  margin: 4px 0 10px;
+  padding-left: 20px;
+}
+
+.edit-cursor .note-pick {
+  position: absolute;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  pointer-events: none;
+}
+.palette button.dyn {
+  font-family: Georgia, 'Times New Roman', serif;
+  font-style: italic;
+  font-weight: 700;
+  min-width: 30px;
+}
+
+.player button.link.warn {
+  border: 0;
+  background: none;
+  padding: 0 4px;
+  color: var(--warn);
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.player button.link.warn:empty {
+  display: none;
+}

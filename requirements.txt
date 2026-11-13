@@ -1,0 +1,6 @@
+pywebview==6.2.1
+pyinstaller
+pymupdf
+opencv-python
+numpy
+pillow

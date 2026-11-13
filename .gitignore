@@ -1,0 +1,20 @@
+# 의존성·빌드 결과
+node_modules/
+web/dist/
+web/scripts/.out/
+dist/
+build/
+*.spec
+__pycache__/
+*.pyc
+
+# 인식 엔진(Audiveris+Java, 약 190MB): python -m omr.fetch_vendor 로 받음
+vendor/
+
+# 개발 중 시험 파일 (구매한 악보에서 나온 데이터 포함, 올리지 않음)
+web/scratch_t/
+*.bscore
+*.musicxml
+*.mxl
+*.omr.log
+dist-new/

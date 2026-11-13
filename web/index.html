@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>밴드 악보 편집기</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">밴드 악보 편집기</div>
+      <nav class="menu">
+        <div class="dd">
+          <button class="dd-btn">파일 ▾</button>
+          <div class="dd-list">
+            <button data-cmd="new">새 악보… <kbd>Ctrl+N</kbd></button>
+            <button data-cmd="open" title="악보 파일(.bscore·.gp·MusicXML)은 바로 열고, PDF·사진은 인식해서 엽니다">열기 (악보·PDF·사진)… <kbd>Ctrl+O</kbd></button>
+            <div class="dd-recent" id="recentList"></div>
+            <hr />
+            <button data-cmd="save">저장 <kbd>Ctrl+S</kbd></button>
+            <button data-cmd="save-as">다른 이름으로 저장…</button>
+            <button data-cmd="export" title="Guitar Pro(.gp), MusicXML(MuseScore), MIDI">내보내기…</button>
+            <hr />
+            <button data-cmd="print">인쇄 / 파트보… <kbd>Ctrl+P</kbd></button>
+          </div>
+        </div>
+        <div class="dd">
+          <button class="dd-btn">악보 ▾</button>
+          <div class="dd-list">
+            <button data-cmd="info">제목·작곡가·빠르기…</button>
+            <button data-cmd="transpose">조바꿈…</button>
+            <button data-cmd="repeat">반복 기호 (도돌이표·D.S.·Coda)…</button>
+            <button data-cmd="meter" title="커서가 있는 마디부터 박자표나 빠르기를 바꿉니다">박자표·빠르기 바꾸기 (이 마디부터)…</button>
+            <hr />
+            <button data-cmd="copy">마디 복사 <kbd>Ctrl+C</kbd></button>
+            <button data-cmd="cut">마디 잘라내기 <kbd>Ctrl+X</kbd></button>
+            <button data-cmd="paste" title="커서 마디부터 덮어씁니다">마디 붙여넣기 <kbd>Ctrl+V</kbd></button>
+            <button data-cmd="paste-insert" title="커서 마디 앞에 마디를 새로 넣고 붙입니다 (다른 트랙에는 빈 마디)">마디 끼워 붙여넣기 <kbd>Ctrl+Shift+V</kbd></button>
+            <hr />
+            <button data-cmd="insert-bar">마디 넣기 (커서 앞)</button>
+            <button data-cmd="delete-bar">마디 지우기 (Ctrl+Shift+Delete)</button>
+            <hr />
+            <button data-cmd="next-problem" title="빨간 밑줄이 그어진, 박자가 모자라거나 넘치는 마디로 이동">박자 안 맞는 다음 마디로 <kbd>F8</kbd></button>
+            <button data-cmd="fit-bar" title="모자라면 끝에 쉼표를 채우고, 넘치면 뒤를 잘라 냅니다 (고른 마디들에도 적용)">이 마디 박자 자동 맞춤 <kbd>F9</kbd></button>
+          </div>
+        </div>
+        <div class="dd">
+          <button class="dd-btn">트랙 ▾</button>
+          <div class="dd-list">
+            <button data-cmd="add-track">새 트랙 추가…</button>
+            <button data-cmd="merge" title="다른 파일의 트랙을 이 악보에 붙입니다">다른 파일에서 트랙 가져오기…</button>
+            <hr />
+            <button data-cmd="band" title="파트별 악보(보컬·기타·베이스·키보드·드럼 PDF나 파일)를 하나의 밴드 총보로">밴드 총보 만들기…</button>
+            <button data-cmd="form" title="밴드 총보에서 파트마다 마디가 기준 파트의 어느 자리에 왔는지 보고 고치기">곡 구조 맞추기…</button>
+          </div>
+        </div>
+        <span class="sep"></span>
+        <button data-cmd="undo" class="icon" title="실행 취소 (Ctrl+Z)">↶</button>
+        <button data-cmd="redo" class="icon" title="다시 실행 (Ctrl+Y)">↷</button>
+        <span class="sep"></span>
+        <button data-cmd="source" id="sourceBtn" title="인식한 원본 PDF·사진을 옆에 나란히 놓고 대조합니다 (F6)">원본 보기</button>
+        <button data-cmd="help" class="icon" title="단축키·도움말">?</button>
+      </nav>
+      <div class="file-name" id="fileName"></div>
+    </header>
+
+    <div class="palette" id="palette"></div>
+
+    <main class="workspace">
+      <aside class="tracks" id="tracks"></aside>
+      <section class="viewport" id="viewport">
+        <div class="score-wrap">
+          <div id="score"></div>
+          <div id="cursor" class="edit-cursor" hidden></div>
+        </div>
+      </section>
+      <aside class="source" id="source" hidden>
+        <div class="source-head">
+          <b id="sourceName">원본</b>
+          <span class="hint">줄을 누르면 그 마디로 이동</span>
+          <span class="grow"></span>
+          <button id="sourceZoomOut" title="원본 작게">−</button>
+          <button id="sourceZoomIn" title="원본 크게">+</button>
+          <button id="sourceClose" title="원본 닫기">✕</button>
+        </div>
+        <div class="source-pages" id="sourcePages"></div>
+      </aside>
+    </main>
+
+    <footer class="player" id="player"></footer>
+    <div class="status" id="status">
+      <div class="status-info" id="statusInfo"></div>
+      <label class="zoom" title="Ctrl + 마우스 휠로도 됩니다">확대 <input type="range" id="zoom" min="50" max="200" step="10" value="100" /><span id="zoomVal">100%</span></label>
+    </div>
+    <div class="toast" id="toast" hidden></div>
+    <dialog id="dialog"></dialog>
+    <div class="drop" id="drop" hidden>
+      <div class="drop-zone" data-drop="open"><b>새로 열기</b><span>악보 파일은 바로, PDF·사진은 인식해서 엽니다.<br />여러 개를 놓으면 밴드 총보로 합칩니다.</span></div>
+      <div class="drop-zone" data-drop="merge"><b>지금 악보에 트랙으로 추가</b><span>놓은 파일의 트랙을 이 악보에 붙입니다.</span></div>
+    </div>
+    <div class="popup" id="popup" hidden></div>
+    <input class="inline-edit" id="inlineEdit" hidden />
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
