@@ -1,6 +1,6 @@
 import { importer, model, Settings } from '@coderline/alphatab';
 import { fillDrumBar, kitForPosition, type DrumHit } from './drums';
-import { applySlashHeads } from './notes';
+import { applyDeadHeads, applySlashHeads } from './notes';
 import { restoreJumpWords, restoreSlashChords } from './musicxml';
 
 // 악보 인식(Audiveris) 결과 MusicXML을 alphaTab으로 불러오기 전·후에 고치는 것들.
@@ -110,9 +110,26 @@ export function markBeamedTriplets(xml: string): string {
           if (g) g.push(i), groups.push(g), open.delete(n.voice);
         }
       });
-      const triplets = groups.filter((g) => {
+      const beat = (divisions * 4) / beatType;
+      const candidates = groups.filter((g) => {
         const ns = g.map((i) => notes[i]);
         return ns.length === 3 && ns.every((n) => !n.rest && !n.dotted && !n.tuplet && n.type === ns[0].type && n.dur === ns[0].dur);
+      });
+      // 셋잇단 묶음은 박 위에서 시작한다. 쉼표 뒤 박 중간에서 시작하는 8분 3개 묶음(8분쉼표 + 8분 셋으로 반 마디를 채움)은
+      // 보통 빔 묶음이다. 앞에서 셋잇단으로 본 묶음은 2음 길이로 세며 성부별로 차례로 본다
+      const triplets: number[][] = [];
+      const firstOf = new Map(candidates.map((g) => [g[0], g]));
+      const clock = new Map<string, number>();
+      const inTriplet = new Set<number>();
+      notes.forEach((n, i) => {
+        if (n.chord || n.grace) return;
+        const now = clock.get(n.voice) ?? 0;
+        const g = firstOf.get(i);
+        if (g && (n.dur * 2 < beat || Math.abs(now / beat - Math.round(now / beat)) < 1e-6)) {
+          triplets.push(g);
+          g.forEach((k) => inTriplet.add(k));
+        }
+        clock.set(n.voice, now + (inTriplet.has(i) ? (n.dur * 2) / 3 : n.dur));
       });
       if (!triplets.length) return mo + inner + mc;
       // 성부마다 줄어든 길이를 쉼표 하나로 채울 수 있어야 한다
@@ -166,6 +183,7 @@ export function loadRecognized(data: Uint8Array, settings: Settings, report?: st
   const score = importer.ScoreLoader.loadScoreFromBytes(new TextEncoder().encode(xml), settings);
   rebuildDrumsFromXml(score, xml);
   applySlashHeads(score);
+  applyDeadHeads(score);
   const slash = restoreSlashChords(score, xml);
   restoreJumpWords(score, xml);
   if (slash) report?.push(`분수 코드의 베이스음 ${slash}개를 되살림 (예: C → C/E)`);

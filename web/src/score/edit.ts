@@ -327,7 +327,9 @@ export function barFill(bar: model.Bar): number {
   let worst = 0;
   for (const v of bar.voices) {
     if (v.isEmpty) continue;
-    const d = v.calculateDuration() - expected;
+    // 적힌 길이의 합(꾸밈음은 0). alphaTab의 재생 길이는 꾸밈음이 앞 박자(앞 마디 끝 음 포함)의 시간을 빌려 쓰므로,
+    // 그걸로 세면 꾸밈음이 있는 마디는 '넘침', 그 앞 마디는 '모자람'으로 잘못 나왔다
+    const d = v.beats.reduce((n, b) => n + b.displayDuration, 0) - expected;
     if (Math.abs(d) > Math.abs(worst)) worst = d;
   }
   return worst;
@@ -405,37 +407,112 @@ export function techniqueOn(n: Note, t: Technique): boolean {
   }
 }
 
-function prevBeat(beat: Beat): Beat | null {
-  return beat.previousBeat;
+/** 붙임줄을 걸 앞 음: 같은 줄(오선은 같은 음높이)의 가장 가까운 앞 음. 쉼표를 만나면 없음. 바로 앞 마디까지만 */
+function tieSource(beat: Beat, match: (n: Note) => boolean): Note | null {
+  const bar = beat.voice.bar.index;
+  for (let b = beat.previousBeat; b && bar - b.voice.bar.index <= 1; b = b.previousBeat) {
+    if (b.graceType !== model.GraceType.None || b.isEmpty) continue;
+    if (!b.notes.length) return null;
+    const n = b.notes.find(match);
+    if (n) return n;
+  }
+  return null;
 }
 
-export function toggleTechnique(score: Score, c: Cursor, t: Technique) {
+/**
+ * 붙임줄 켜기·끄기. 걸 수 없으면 까닭을 글로 돌려준다.
+ * 전에는 바로 앞 박자에 같은 줄 음이 있을 때만 걸려서(다른 줄 음을 사이에 둔 경우·빈 줄에서 누른 경우 아무 일도 안 일어남)
+ * '될 때도 있고 안 될 때도 있는' 것처럼 보였다.
+ */
+function toggleTie(beat: Beat, c: Cursor): string | undefined {
+  const staff = staffOf(beat);
+  if (staff.isPercussion) return '드럼에는 붙임줄을 걸 수 없습니다.';
+  if (staff.isStringed) {
+    const note = beat.getNoteOnString(c.string);
+    if (note?.isTieDestination) {
+      note.isTieDestination = false;
+      return;
+    }
+    const src = tieSource(beat, (n) => n.string === c.string);
+    if (note) {
+      if (!src) return `앞에 ${c.string}번 줄 음이 없어서 붙임줄을 걸 수 없습니다 (쉼표 뒤에는 걸 수 없음).`;
+      note.fret = src.fret;
+      note.isTieDestination = true;
+      return;
+    }
+    // 커서 줄에 음이 없는 박자: 박자를 눌러 고르면(음 숫자를 정확히 누르지 않으면) 커서 줄이 그대로라 생긴다.
+    // 이 박자의 음들 중 앞 음이 있는 것에 건다 (모두 걸려 있으면 푼다)
+    if (beat.notes.length) {
+      if (beat.notes.every((n) => n.isTieDestination)) {
+        for (const n of beat.notes) n.isTieDestination = false;
+        return;
+      }
+      let done = 0;
+      for (const n of beat.notes) {
+        const from = tieSource(beat, (x) => x.string === n.string);
+        if (!from) continue;
+        n.fret = from.fret;
+        n.isTieDestination = true;
+        done++;
+      }
+      return done ? undefined : '앞에 같은 줄 음이 없어서 붙임줄을 걸 수 없습니다 (쉼표 뒤에는 걸 수 없음).';
+    }
+    // 빈 박자·쉼표에서 누르면 앞 음을 이어 받는 음을 만든다 (Guitar Pro와 같게). 커서 줄에 앞 음이 없으면 앞 박자의 음 전부
+    const sources = src ? [src] : (tieSource(beat, () => true)?.beat.notes ?? []);
+    if (!sources.length) return '앞에 이어 받을 음이 없어서 붙임줄을 걸 수 없습니다 (쉼표 뒤에는 걸 수 없음).';
+    clearRest(beat, beat.duration);
+    for (const from of sources) {
+      const n = new model.Note();
+      n.string = from.string;
+      n.fret = from.fret;
+      n.isTieDestination = true;
+      beat.addNote(n);
+    }
+    return;
+  }
+  // 키보드·보컬: 고른 음(없으면 화음 전체). 빈 박자·쉼표면 앞 박자의 음을 모두 이어 받는다
+  if (!beat.notes.length) {
+    const prev = tieSource(beat, () => true)?.beat;
+    if (!prev) return '앞에 이어 받을 음이 없어서 붙임줄을 걸 수 없습니다 (쉼표 뒤에는 걸 수 없음).';
+    clearRest(beat, beat.duration);
+    for (const p of prev.notes) {
+      const n = new model.Note();
+      setPianoPitch(n, notePitch(p));
+      n.isTieDestination = true;
+      beat.addNote(n);
+    }
+    return;
+  }
+  const targets = c.note !== undefined && beat.notes[c.note] ? [beat.notes[c.note]] : beat.notes;
+  if (targets.every((n) => n.isTieDestination)) {
+    for (const n of targets) n.isTieDestination = false;
+    return;
+  }
+  let missed = 0;
+  for (const note of targets) {
+    if (note.isTieDestination) continue;
+    const src = tieSource(beat, (n) => notePitch(n) === notePitch(note)) ?? (beat.previousBeat?.notes[beat.notes.indexOf(note)] ?? null);
+    if (!src || src.beat.notes.length === 0) {
+      missed++;
+      continue;
+    }
+    setPianoPitch(note, notePitch(src));
+    note.isTieDestination = true;
+  }
+  if (missed === targets.length) return '앞에 이어 받을 음이 없어서 붙임줄을 걸 수 없습니다 (쉼표 뒤에는 걸 수 없음).';
+}
+
+export function toggleTechnique(score: Score, c: Cursor, t: Technique): string | undefined {
   const beat = beatAt(score, c);
   // 빗금은 박자 전체에 (화음을 리듬만 바꿔 다시 치기)
   if (t === 'slash') {
     if (beat.notes.length) setSlashed(beat, !beat.slashed);
     return;
   }
+  if (t === 'tie') return toggleTie(beat, c);
   const targets = staffOf(beat).isStringed ? [noteAtCursor(beat, c)].filter((n): n is Note => !!n) : beat.notes;
   for (const note of targets) {
     switch (t) {
-      case 'tie': {
-        if (note.isTieDestination) {
-          note.isTieDestination = false;
-          break;
-        }
-        const prev = prevBeat(beat);
-        const src = prev
-          ? note.isStringed
-            ? prev.getNoteOnString(note.string)
-            : (prev.notes.find((n) => notePitch(n) === notePitch(note)) ?? prev.notes[beat.notes.indexOf(note)])
-          : null;
-        if (!src) break;
-        if (note.isStringed) note.fret = src.fret;
-        else setPianoPitch(note, notePitch(src));
-        note.isTieDestination = true;
-        break;
-      }
       case 'hammer':
         note.isHammerPullOrigin = !note.isHammerPullOrigin;
         break;

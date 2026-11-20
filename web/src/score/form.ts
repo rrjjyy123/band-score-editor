@@ -32,15 +32,23 @@ export function playOrder(score: Score): number[] {
   let jumped = false;
   for (let i = 0, guard = 0; i < mbs.length && guard < 10000; guard++) {
     const mb = mbs[i];
-    if (mb.isRepeatStart && !jumped) {
+    const endings = mb.alternateEndings;
+    // 도돌이 시작 마디에 붙은 괄호(2번 괄호 겸 새 도돌이 시작)는 바깥 도돌이의 것 — 처음 닿을 때만 앞 회차로 따지고,
+    // 안쪽 도돌이로 되돌아왔을 때는 그대로 친다
+    const ownStart = mb.isRepeatStart && !jumped;
+    const innerReturn = mb.isRepeatStart && jumped;
+    if (ownStart) {
+      if (endings && pass && !(endings & (1 << pass))) {
+        i++;
+        continue;
+      }
       start = i;
       pass = 0;
       inGroup = true;
     }
     jumped = false;
-    const endings = mb.alternateEndings;
     if (!endings && !inGroup && pass) pass = 0; // 괄호가 끝나면 회차를 잊는다
-    if (endings && !(endings & (1 << pass)) && (inGroup || pass)) {
+    if (!ownStart && !innerReturn && endings && !(endings & (1 << pass)) && (inGroup || pass)) {
       i++;
       continue;
     }

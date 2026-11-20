@@ -17,10 +17,11 @@
             <div class="dd-recent" id="recentList"></div>
             <hr />
             <button data-cmd="save">저장 <kbd>Ctrl+S</kbd></button>
-            <button data-cmd="save-as">다른 이름으로 저장…</button>
-            <button data-cmd="export" title="Guitar Pro(.gp), MusicXML(MuseScore), MIDI">내보내기…</button>
+            <button data-cmd="save-as" title="파일 형식을 골라 저장: 편집기 파일(.bscore), Guitar Pro(.gp), MusicXML(MuseScore), MIDI, PDF">다른 이름으로 저장 (형식 고르기)… <kbd>Ctrl+Shift+S</kbd></button>
             <hr />
             <button data-cmd="print">인쇄 / 파트보… <kbd>Ctrl+P</kbd></button>
+            <hr />
+            <button data-cmd="claude" title="Claude(AI)가 이 편집기를 조작해 인식 결과를 원본과 비교해 고치게 합니다">Claude(AI) 연결하기…</button>
           </div>
         </div>
         <div class="dd">
@@ -30,6 +31,14 @@
             <button data-cmd="transpose">조바꿈…</button>
             <button data-cmd="repeat">반복 기호 (도돌이표·D.S.·Coda)…</button>
             <button data-cmd="meter" title="커서가 있는 마디부터 박자표나 빠르기를 바꿉니다">박자표·빠르기 바꾸기 (이 마디부터)…</button>
+            <button data-cmd="guess-chords" title="코드 이름이 없는 마디에 악보의 음으로 짐작한 코드 이름을 적습니다">코드 이름 추정해 적기…</button>
+            <hr />
+            <button data-cmd="bar-width-even" title="한 줄의 마디를 같은 너비로 (마디마다 넓게·좁게 조절 가능)">마디 너비: 고르게</button>
+            <button data-cmd="bar-width-auto" title="음표가 많은 마디는 넓게, 적은 마디는 좁게 (자동)">마디 너비: 음표 양에 맞춰</button>
+            <button data-cmd="bars-per-line">한 줄 마디 수…</button>
+            <button data-cmd="bar-wider" title="고른 마디(없으면 커서 마디)를 같은 줄의 다른 마디보다 넓게">마디 넓게 <kbd>Ctrl+]</kbd></button>
+            <button data-cmd="bar-narrower">마디 좁게 <kbd>Ctrl+[</kbd></button>
+            <button data-cmd="bar-width-reset">마디 너비 원래대로</button>
             <hr />
             <button data-cmd="copy">마디 복사 <kbd>Ctrl+C</kbd></button>
             <button data-cmd="cut">마디 잘라내기 <kbd>Ctrl+X</kbd></button>
@@ -51,6 +60,7 @@
             <hr />
             <button data-cmd="band" title="파트별 악보(보컬·기타·베이스·키보드·드럼 PDF나 파일)를 하나의 밴드 총보로">밴드 총보 만들기…</button>
             <button data-cmd="form" title="밴드 총보에서 파트마다 마디가 기준 파트의 어느 자리에 왔는지 보고 고치기">곡 구조 맞추기…</button>
+            <button data-cmd="accomp" title="다른 파트에 적힌 코드 이름과 박자로 키보드·기타·베이스 반주 트랙을 만듭니다 (그 악기 악보가 없을 때)">반주 파트 만들기 (코드로 키보드·기타·베이스)…</button>
           </div>
         </div>
         <span class="sep"></span>

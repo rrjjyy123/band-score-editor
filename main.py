@@ -12,8 +12,61 @@ import sys
 import tempfile
 import threading
 
-import webview
+
+def unblock_downloaded_files():
+    """인터넷에서 받은 zip을 탐색기로 풀면 파일마다 '인터넷에서 받음' 표시(Zone.Identifier 스트림)가 붙는다.
+    .NET은 그런 DLL을 읽지 않아(Python.Runtime.dll 'Failed to resolve ... Loader.Initialize') 창이 아예 안 뜬다.
+    exe 폴더의 실행 파일들에서 그 표시를 지운다(처음 켤 때 한 번 지우면 그 뒤로는 지울 것이 없다)."""
+    if not getattr(sys, "frozen", False) or os.name != "nt":
+        return 0
+    removed = 0
+    for root, _dirs, files in os.walk(os.path.dirname(sys.executable)):
+        for f in files:
+            if f.lower().endswith((".dll", ".exe", ".pyd", ".jar")):
+                try:
+                    os.remove(os.path.join(root, f) + ":Zone.Identifier")
+                    removed += 1
+                except OSError:
+                    pass
+    return removed
+
+
+unblock_downloaded_files()
+
+WEBVIEW2_URL = "https://developer.microsoft.com/microsoft-edge/webview2/#download-section"
+
+
+def has_webview2():
+    """Microsoft Edge WebView2 런타임이 깔려 있는지 (윈도우 11·최신 10은 기본으로 있음, 오래된 10은 없을 수 있음)."""
+    if os.name != "nt":
+        return True
+    import winreg
+    key = r"Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    for hive, path in ((winreg.HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\" + key),
+                       (winreg.HKEY_LOCAL_MACHINE, "SOFTWARE\\" + key),
+                       (winreg.HKEY_CURRENT_USER, "Software\\" + key)):
+        try:
+            with winreg.OpenKey(hive, path) as k:
+                pv = winreg.QueryValueEx(k, "pv")[0]
+                if pv and pv != "0.0.0.0":
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def message_box(text, title="밴드 악보 편집기"):
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, text, title, 0x10)
+    except Exception:
+        print(text, file=sys.stderr)
+
+
+import webview  # noqa: E402  (위에서 표시를 지운 뒤에 불러온다)
 from webview.dom import DOMEventHandler
+
+from mcp_bridge import McpBridge
 
 APP_TITLE = "밴드 악보 편집기"
 DEV_URL = "http://localhost:5191"
@@ -103,6 +156,7 @@ class Api:
         self._dropped = []
         self._dirty = False
         self._cancel = threading.Event()
+        self._mcp = McpBridge()
 
     def startup_file(self):
         """exe에 파일을 넘겨 실행했거나(파일을 exe 위로 끌어다 놓기 포함) 연결 프로그램으로 열었을 때 그 파일."""
@@ -273,8 +327,91 @@ class Api:
         return {"pages": pages}
 
 
+    # ---- AI 도구(MCP) ----
+
+    def mcp_wait(self):
+        """Claude가 보낸 요청 하나 (없으면 20초 뒤 None). 화면이 계속 불러 기다린다"""
+        return self._mcp.wait()
+
+    def mcp_result(self, req_id, result):
+        return self._mcp.reply(req_id, result)
+
+    def page_image(self, path, page, y0=0.0, y1=1.0):
+        """원본 쪽 하나를 AI가 TAB 숫자까지 읽을 만큼 크게(가로 1800px). y0~y1(쪽 높이 비율)로 자른다. page < 0이면 쪽 수만"""
+        if not path or not os.path.isfile(path):
+            return {"error": f"원본 파일이 없습니다: {path}"}
+        try:
+            import pymupdf
+            if path.lower().endswith(".pdf"):
+                doc = pymupdf.open(path)
+            else:
+                doc = pymupdf.open(path)
+                doc = pymupdf.open("pdf", doc.convert_to_pdf())
+            with doc:
+                if page < 0:
+                    return {"data": "", "mime": "image/jpeg", "pages": doc.page_count}
+                if page >= doc.page_count:
+                    return {"error": f"원본은 {doc.page_count}쪽까지입니다."}
+                pg = doc[page]
+                r = pg.rect
+                clip = pymupdf.Rect(r.x0, r.y0 + r.height * max(0.0, y0), r.x1, r.y0 + r.height * min(1.0, y1))
+                zoom = 1800 / max(1.0, r.width)
+                pix = pg.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=clip, colorspace=pymupdf.csGRAY)
+                data = base64.b64encode(pix.tobytes("jpeg", jpg_quality=85)).decode("ascii")
+                return {"data": data, "mime": "image/jpeg", "pages": doc.page_count}
+        except Exception as e:
+            return {"error": f"원본을 읽지 못했습니다: {e}"}
+
+    def mcp_info(self):
+        """Claude 연결 안내에 쓸 파일 위치: 한 번에 설치 파일(.mcpb), 서버 스크립트"""
+        base = os.path.join(resource_dir(), "mcp")
+        mcpb = os.path.join(base, "band-score.mcpb")
+        server = os.path.join(base, "server", "index.mjs")
+        return {
+            "mcpb": mcpb if os.path.isfile(mcpb) else None,
+            "server": server if os.path.isfile(server) else None,
+            "node": shutil.which("node"),
+        }
+
+    def open_path_in_shell(self, path):
+        """파일을 연결 프로그램으로 연다 (.mcpb → Claude 데스크톱 설치 창)"""
+        if not path or not os.path.exists(path):
+            return False
+        os.startfile(path)
+        return True
+
+
+def no_stale_cache():
+    """새로 빌드한 화면이 예전 캐시에 가려지지 않게 한다.
+
+    내장 서버는 늘 같은 주소(127.0.0.1:42001)라서 WebView2가 이전 빌드의 index.html을 디스크 캐시에서
+    꺼내 쓰면, 이미 없는 이전 스크립트를 찾다가 화면이 메뉴만 뜬 채 멈춘다. pywebview가 no-cache 헤더를
+    붙이려 하지만 bottle.static_file이 새 응답을 돌려주는 바람에 헤더가 빠지므로 여기서 직접 붙이고,
+    이미 쌓인 HTTP 캐시는 창을 띄우기 전에 지운다(저장 공간·localStorage는 다른 폴더라 그대로).
+    """
+    import bottle
+
+    static_file = bottle.static_file
+
+    def static_file_no_cache(*args, **kwargs):
+        res = static_file(*args, **kwargs)
+        res.set_header("Cache-Control", "no-cache")
+        return res
+
+    bottle.static_file = static_file_no_cache
+    cache = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "pywebview", "EBWebView", "Default", "Cache")
+    shutil.rmtree(cache, ignore_errors=True)  # 다른 창이 쓰는 중이면 지워지지 않아도 그냥 둔다
+
+
 def main():
     dev = "--dev" in sys.argv
+    if not has_webview2():
+        # 없으면 pywebview가 옛 IE 엔진으로 넘어가 화면이 깨진다 → 알리고 받는 곳을 연다
+        message_box("이 컴퓨터에 'Microsoft Edge WebView2 런타임'이 없어 화면을 띄울 수 없습니다.\n\n"
+                    "확인을 누르면 내려받는 페이지가 열립니다. 'Evergreen Bootstrapper'를 설치한 뒤 다시 실행해 주세요.")
+        import webbrowser
+        webbrowser.open(WEBVIEW2_URL)
+        return
     files = [a for a in sys.argv[1:] if not a.startswith("--")]
     api = Api(os.path.abspath(files[0]) if files else None)
     if dev:
@@ -309,8 +446,18 @@ def main():
             return True
 
     window.events.closing += on_closing
+    if not dev:
+        no_stale_cache()
+    # Claude(MCP)가 이 창을 조작할 수 있게 로컬 연결 서버를 켠다 (끌 때 연결 정보 지움)
+    try:
+        api._mcp.start()
+    except OSError as e:
+        print("AI 도구 연결 서버를 켜지 못했습니다:", e, file=sys.stderr)
     # 로컬 파일을 file://로 열면 사운드폰트·글꼴을 fetch할 수 없어서 내장 HTTP 서버로 띄운다
-    webview.start(http_server=not dev, private_mode=False, debug="--debug" in sys.argv)
+    try:
+        webview.start(http_server=not dev, private_mode=False, debug="--debug" in sys.argv)
+    finally:
+        api._mcp.stop()
 
 
 if __name__ == "__main__":

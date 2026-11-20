@@ -19,6 +19,9 @@ TYPE_U = {"whole": 48, "half": 24, "quarter": 12, "eighth": 6, "16th": 3}
 CANDS = {3: 0.0, 6: 0.0, 12: 0.0, 24: 0.0, 48: 0.0, 4: 0.05, 8: 0.12, 2: 0.2, 16: 0.35,
          9: 0.15, 18: 0.1, 36: 0.1, 15: 0.6, 21: 0.7, 30: 0.5, 42: 0.7}
 NO_EVIDENCE_TRIPLET = 0.45
+# 박 사이에 놓친 쉼표: 앞 박 길이로 설명되는 간격의 몇 배부터 쉼표를 의심할지, 끼우는 기본 벌점
+GAP_REST_MIN = 1.4
+GAP_REST_COST = 0.35
 TRIPLET = {2: ("16th", 0), 4: ("eighth", 0), 8: ("quarter", 0), 16: ("half", 0)}
 PLAIN = {48: ("whole", 0), 36: ("half", 1), 24: ("half", 0), 18: ("quarter", 1), 12: ("quarter", 0),
          9: ("eighth", 1), 6: ("eighth", 0), 3: ("16th", 0)}
@@ -65,15 +68,21 @@ def _twin(d):
     return out
 
 
-def solve(events, length):
+def solve(events, length, mid_rests=None):
     """events = [{'x', 'aud'(길이 또는 None), 'rest'(bool), 'beam3'(bool)}] (x 순서), length = 마디 길이.
-    (박마다 길이 목록(건너뛴 쉼표는 0), 앞 쉼표 길이, 뒤 쉼표 길이, 벌점) 또는 None."""
+    (박마다 길이 목록(건너뛴 쉼표는 0), 앞 쉼표 길이, 뒤 쉼표 길이, 벌점) 또는 None.
+    mid_rests에 리스트를 주면 박 앞에 끼워 넣은(Audiveris가 놓친) 쉼표 길이를 박마다 채워 준다(없으면 0)."""
     n = len(events)
     if not n:
         return None
     xs = [e["x"] for e in events]
     gaps = [xs[i + 1] - xs[i] for i in range(n - 1)]
     cands = [d for d in CANDS if d <= length]
+    # 길이 한 단위의 가로 폭: Audiveris가 읽은 길이와 다음 박까지 간격의 비(중앙값). 박 사이에 놓친 쉼표를
+    # 찾는 데 쓴다(8분 둘 다음 8분쉼표를 못 읽으면 그 자리 간격만 두 배로 벌어져 있다)
+    ratios = sorted(gaps[i] / events[i]["aud"] for i in range(n - 1)
+                    if events[i].get("aud") and gaps[i] > 0 and not events[i].get("rest"))
+    unit = ratios[len(ratios) // 2] if len(ratios) >= 3 else None
 
     def local(i, d):
         e = events[i]
@@ -104,6 +113,17 @@ def solve(events, length):
     for lead in (3, 6, 12, 18, 24, 36):      # Audiveris가 놓친 맨 앞 쉼표
         if lead < length:
             states[(lead, 0)] = (1.0 + 0.1 * lead / 12, None)
+    def gap_rest(i, dp, r):
+        """i번째 박 앞(앞 박 길이 dp 뒤)에 놓친 쉼표 r을 끼우는 벌점. 앞 박과의 간격이 dp+r에 맞을수록 싸다."""
+        if unit is None or i == 0 or gaps[i - 1] <= 0:
+            return None
+        want = (dp + r) * unit
+        plain = dp * unit
+        # 쉼표 없이 설명되는 간격(1.5배 안)이면 끼우지 않는다
+        if gaps[i - 1] < GAP_REST_MIN * plain:
+            return None
+        return GAP_REST_COST + 1.2 * abs(math.log(gaps[i - 1] / want))
+
     layers = [states]
     for i in range(n):
         nxt = {}
@@ -111,20 +131,31 @@ def solve(events, length):
             opts = list(cands)
             if events[i].get("rest"):
                 opts.append(0)                # 잘못 읽은 쉼표는 버릴 수 있다
-            for d in opts:
-                if d == 0:
-                    c = cost + 1.0
-                    key = (t, dp)
-                else:
-                    if t + d > length or not legal(t, d):
-                        continue
-                    # 박 중간에서는 그 박을 시작한 음과 같은 갈래(셋잇단/보통)만 올 수 있다
-                    if t % U and (d in TRIPLET) != (dp in TRIPLET):
-                        continue
-                    c = cost + local(i, d) + (pair(i, dp, d) if dp else 0.0)
-                    key = (t + d, d)
-                if key not in nxt or c < nxt[key][0]:
-                    nxt[key] = (c, (t, dp, d))
+            rests = [0]
+            if dp and not events[i].get("rest"):
+                rests += [r for r in (3, 6, 12, 24) if gap_rest(i, dp, r) is not None]
+            for r in rests:
+                rc = gap_rest(i, dp, r) if r else 0.0
+                tr = t + r
+                if r and (tr > length or not legal(t, r)):
+                    continue
+                for d in opts:
+                    if d == 0:
+                        if r:
+                            continue
+                        c = cost + 1.0
+                        key = (t, dp)
+                    else:
+                        if tr + d > length or not legal(tr, d):
+                            continue
+                        # 박 중간에서는 그 박을 시작한 음과 같은 갈래(셋잇단/보통)만 올 수 있다
+                        if tr % U and (d in TRIPLET) != ((dp if not r else r) in TRIPLET):
+                            continue
+                        # 쉼표를 끼웠으면 간격 비교(pair)는 쉼표 벌점이 대신한다
+                        c = cost + rc + local(i, d) + (pair(i, dp, d) if dp and not r else 0.0)
+                        key = (tr + d, d)
+                    if key not in nxt or c < nxt[key][0]:
+                        nxt[key] = (c, (t, dp, d, r))
         if not nxt:
             return None
         layers.append(nxt)
@@ -140,11 +171,14 @@ def solve(events, length):
         return None
     cost, t, dp = best
     tail = length - t
-    durs = []
+    durs, rests = [], []
     for i in range(n, 0, -1):
-        _, (pt, pdp, d) = layers[i][(t, dp)]
+        _, (pt, pdp, d, r) = layers[i][(t, dp)]
         durs.append(d)
+        rests.append(r)
         t, dp = pt, pdp
+    if mid_rests is not None:
+        mid_rests[:] = rests[::-1]
     return durs[::-1], t, tail, cost
 
 
@@ -494,7 +528,8 @@ def rebuild(staves, chords, part_el, tuning, capo, shift, page_map, staff_no=1, 
                 info["kept"] += 1
                 done.add(id(meas))
                 continue
-            res = solve(events, length)
+            gaps_rest = []
+            res = solve(events, length, gaps_rest)
             if res is None or res[3] > 0.9 * len(events) + 1.5:
                 info["unsolved"] += 1
                 continue
@@ -504,7 +539,10 @@ def rebuild(staves, chords, part_el, tuning, capo, shift, page_map, staff_no=1, 
                 timeline.append((0, lead, [], False))
                 t = lead
             prev_x = -1e9
-            for e, d in zip(events, durs):
+            for e, d, r in zip(events, durs, gaps_rest):
+                if r:                         # 박 사이에 놓친 쉼표
+                    timeline.append((t, r, [], False))
+                    t += r
                 if not d:
                     continue
                 palm = bool(e["notes"]) and any(a - 0.8 * st.spacing <= e["x"] <= b for a, b in spans)

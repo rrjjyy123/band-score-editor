@@ -253,6 +253,19 @@ def remove_tabs(bw):
         if gi in used or len(g) < 2 or abs(sp - interline) <= 0.15 * interline or sp > 2.5 * interline:
             continue
         g = list(g)
+        # 숫자가 한 줄을 통째로 가리면(2번 줄 '13-13-13…') 그 위 줄들은 간격이 TAB의 2배인 묶음으로 따로 잡혀
+        # 위 조건(간격 > 2.5칸)에서 빠진다 → 바로 위에 붙은, 간격이 TAB 간격의 정수배인 묶음도 같은 TAB으로
+        for gp in range(gi - 1, -1, -1):
+            prev = groups[gp][1]
+            # 줄 두 개가 통째로 가려지기도 한다(첫 줄만 따로 남음) → 틈이 TAB 간격의 정수배이고 합쳐도 6줄 안이면 같은 TAB
+            gap = (g[0][0] - prev[-1][0]) / sp
+            if gp in used or len(prev) == 5 or abs(gap - round(gap)) > 0.15 or g[-1][0] - prev[0][0] > 5.3 * sp:
+                break
+            steps = np.diff([ln[0] for ln in prev]) / sp
+            if len(steps) and np.any(np.abs(steps - np.round(steps)) > 0.15):
+                break
+            g = list(prev) + g
+            used.add(gp)
         for gj in range(gi + 1, len(groups)):
             nxt = groups[gj][1]
             if len(nxt) == 5 or nxt[0][0] - g[-1][0] > 2.2 * sp:

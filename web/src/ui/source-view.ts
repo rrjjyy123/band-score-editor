@@ -80,11 +80,16 @@ export class SourceView {
 
   /** 단의 세로 범위(쪽 높이에 대한 비율). 그림에서 못 찾은 단은 쪽 안에서 고르게 나눠 어림한다 */
   private span(i: number): [number, number] {
-    const [page, y0, y1] = this.systems[i];
+    return this.spanOf(i, this.systems);
+  }
+
+  /** 단 i의 세로 범위 (원본 보기를 아직 안 열었어도 단 목록으로 계산) */
+  spanOf(i: number, systems: SourceSystem[]): [number, number] {
+    const [page, y0, y1] = systems[i];
     if (y0 >= 0) return [y0, y1];
-    const same = this.systems.map((s, k) => ({ s, k })).filter((x) => x.s[0] === page);
+    const same = systems.map((s, k) => ({ s, k })).filter((x) => x.s[0] === page);
     const pos = same.findIndex((x) => x.k === i);
-    const top = page === this.systems[0][0] ? 0.16 : 0.06;
+    const top = page === systems[0][0] ? 0.16 : 0.06;
     const h = (0.94 - top) / same.length;
     return [top + pos * h, top + (pos + 1) * h - 0.02];
   }

@@ -1,5 +1,6 @@
 import { AlphaTabApi, exporter, importer, LayoutMode, midi, model, PlayerMode, Settings, synth, SystemsLayoutMode } from '@coderline/alphatab';
-import { autosaveClear, autosaveRead, autosaveWrite, Cancelled, cancelRecognize, fromDropped, isDesktop, isScan, openFile, openFiles, openPath, pageImages, recentFiles, recognize, saveFile, saveTo, tellDirty, type OpenedFile } from './bridge';
+import { autosaveClear, autosaveRead, autosaveWrite, Cancelled, cancelRecognize, fromDropped, isDesktop, isScan, mcpReply, mcpWait, openFile, openFiles, openPath, pageImage, pageImages, recentFiles, recognize, saveFile, saveTo, tellDirty, type McpRequest, type McpResult, type OpenedFile } from './bridge';
+import { barHeader, FORMAT_HELP, parseBarLines, readBars, writeBar } from './score/textbar';
 import { cursorOf, ScoreDoc, type Cursor } from './score/doc';
 import * as ed from './score/edit';
 import { DRUM_KIT, drumByKey, drumName, normalizeDrumTrack, stripCustomSymbols } from './score/drums';
@@ -10,6 +11,7 @@ import { createDemo, createTemplate, keyName, type TemplateOptions } from './sco
 import { exportMusicXml, fixMusicXmlCredits, restoreJumpWords, restoreSlashChords } from './score/musicxml';
 import { isNative, loadNative, loadNativeMeta, NATIVE_EXT, saveNative } from './score/native';
 import { dropEstimateMarks, isRecognizedXml, loadRecognized } from './score/omrfix';
+import * as acc from './score/accomp';
 import { parsePitchName, pitchForLetter, pitchName, transposeKey } from './theory/pitch';
 import { choose, esc, info, progress, showDialog, toast } from './ui/dialog';
 import { formDialog } from './ui/form-view';
@@ -63,7 +65,8 @@ export class App {
     s.display.resources.mainGlyphColor = black;
     s.display.resources.secondaryGlyphColor = black;
     s.player.playerMode = PlayerMode.EnabledSynthesizer;
-    s.player.soundFont = new URL('./soundfont/sonivox.sf3', document.baseURI).href;
+    // 악기 소리: FluidR3 Mono GM(MuseScore 3 기본 소리, MIT). 어쿠스틱 피아노 세 가지는 아래에서 sonivox로 채운다
+    s.player.soundFont = new URL('./soundfont/FluidR3Mono_GM.sf3', document.baseURI).href;
     s.player.scrollElement = $('viewport');
     s.player.enableCursor = true;
     s.player.enableAnimatedBeatCursor = true;
@@ -71,6 +74,14 @@ export class App {
     s.player.scrollOffsetY = -60;
 
     this.api = new AlphaTabApi($('score'), s);
+    // FluidR3의 어쿠스틱 피아노(0·1·3번)는 alphaTab에서 거의 소리가 안 나서 사운드폰트 파일에서 빼 두었다(bank 98).
+    // 그 세 악기는 sonivox를 뒤에 덧붙여 채운다(악기를 찾을 때 앞 파일에 없으면 뒤 파일에서 찾음)
+    let pianoAdded = false;
+    this.api.soundFontLoaded.on(() => {
+      if (pianoAdded) return;
+      pianoAdded = true;
+      this.api.loadSoundFont(new URL('./soundfont/sonivox.sf3', document.baseURI).href, true);
+    });
     this.doc = this.newDoc(createDemo(s), '예제 리프.bscore');
     this.doc.dirty = false;
     this.buildMenu();
@@ -81,6 +92,10 @@ export class App {
     $('sourceZoomIn').onclick = () => this.sourceView.zoomBy(1.2);
     $('sourceZoomOut').onclick = () => this.sourceView.zoomBy(1 / 1.2);
 
+    // 재생 따라가기 스크롤은 '재생 중'에만 한다. alphaTab은 다시 그린 뒤 한 프레임 늦게(requestAnimationFrame) 재생 위치로
+    // 스크롤하는데, 그 자리가 박자가 모자란 마디 등에서 곡 처음으로 잡히면 편집할 때마다 화면이 맨 위로 튀었다.
+    // (전에는 그리는 동안만 scrollMode를 껐지만, 늦게 오는 스크롤은 이미 다시 켠 뒤라 막지 못했다)
+    this.api.customScrollHandler = this.playScroll();
     this.api.postRenderFinished.on(() => {
       this.rendering = false;
       // 다시 그리면 화면이 맨 위로 올라가므로, 그리기 전 스크롤 위치로 되돌린다
@@ -94,8 +109,29 @@ export class App {
       }
       this.drawBarWarnings();
     });
-    this.api.renderStarted.on(() => (this.rendering = true));
-    this.api.beatMouseDown.on((beat) => this.moveTo(cursorOf(beat, this.cursor.string)));
+    this.api.renderStarted.on(() => {
+      this.rendering = true;
+      this.resetRenderSlots();
+    });
+    // 마우스로 끌면 마디 구간을 고른다 (Shift+→와 같은 구간: 마디 지우기·복사·박자 맞춤 등에 쓰임). 같은 트랙 안에서만
+    let dragFrom: { track: number; bar: number } | null = null;
+    this.api.beatMouseDown.on((beat) => {
+      // 음이 하나뿐인 박자는 숫자를 정확히 안 눌러도 그 음의 줄로 커서를 옮긴다 (붙임줄·기법이 엉뚱한 빈 줄에 걸리지 않게)
+      const only = beat.voice.bar.staff.isStringed && beat.notes.length === 1 ? beat.notes[0].string : this.cursor.string;
+      this.moveTo(cursorOf(beat, only));
+      dragFrom = { track: beat.voice.bar.staff.track.index, bar: beat.voice.bar.index };
+    });
+    this.api.beatMouseMove.on((beat) => {
+      if (!dragFrom || beat.voice.bar.staff.track.index !== dragFrom.track) return;
+      const bar = beat.voice.bar.index;
+      if (bar === dragFrom.bar && !this.sel) return;
+      this.setSelection({ from: Math.min(dragFrom.bar, bar), to: Math.max(dragFrom.bar, bar) });
+      this.cursor = this.doc.clampCursor({ ...this.cursor, bar, beat: 0 });
+      this.drawCursor();
+      this.updateStatus();
+    });
+    this.api.beatMouseUp.on(() => (dragFrom = null));
+    document.addEventListener('mouseup', () => (dragFrom = null));
     this.api.noteMouseDown.on((note) => {
       if (note.isStringed) this.moveTo({ ...cursorOf(note.beat), string: note.string });
       // 키보드·보컬: 화음 안에서 누른 음 하나를 고른다 (↑↓·Delete가 그 음에만 적용)
@@ -105,13 +141,18 @@ export class App {
     // 악보를 다시 그릴 때마다 재생 데이터를 새로 만들므로, 그때마다 음소거·혼자 듣기·음량과 재생 위치를 다시 맞춘다
     // (midiLoaded는 구독할 때 alphaTab 1.8.4의 무한 재귀 버그가 나서 쓰지 않는다. midiLoad는 재생 데이터를 넘기기 직전에 오므로
     //  한 박자 미룬다: 신디사이저 명령은 보낸 순서대로 처리된다)
-    this.api.midiLoad.on(() =>
+    this.api.midiLoad.on((file) => {
+      this.unbakeVolumes(file);
       setTimeout(() => {
         this.applyMixer();
         if (this.keptView && this.keptView.tick > 0 && this.api.playerState !== synth.PlayerState.Playing) this.api.tickPosition = this.keptView.tick;
-      }),
-    );
-    this.api.playerStateChanged.on((e) => this.updatePlayButton(e.state === synth.PlayerState.Playing));
+      });
+    });
+    this.api.playerStateChanged.on((e) => {
+      this.updatePlayButton(e.state === synth.PlayerState.Playing);
+      // 정지(처음으로)는 멈춤과 달리 이어서 재생하지 않는다 (정지 직후엔 재생 위치가 아직 옛 값일 수 있음)
+      if (e.stopped) this.playFrom = '';
+    });
     this.api.playerPositionChanged.on((e) => this.updateTime(e.currentTime, e.endTime));
     this.api.error.on((e) => toast('오류: ' + e.message, 6000));
 
@@ -129,8 +170,8 @@ export class App {
     });
     this.render();
     // exe에 파일을 넘겨 실행했으면 그 파일을 연다 (그 전에 갑자기 꺼져 남은 자동 저장이 있으면 복구를 묻는다)
-    window.addEventListener('pywebviewready', () => this.openStartupFile());
-    if (isDesktop()) this.openStartupFile();
+    window.addEventListener('pywebviewready', () => (this.openStartupFile(), this.mcpLoop()));
+    if (isDesktop()) (this.openStartupFile(), this.mcpLoop());
     else this.offerRecovery();
     // 1분마다 고친 내용을 따로 저장
     setInterval(() => this.autosave(), 60_000);
@@ -272,6 +313,8 @@ export class App {
 
   private loadScore(score: model.Score, name: string) {
     tr.assignChannels(score);
+    // 박자에 붙은 악기 설정이 트랙 악기를 덮어쓰지 않게(예전 파일·인식 결과는 첫 박자에 피아노가 적혀 있음)
+    tr.clearInstrumentAutomations(score);
     tr.ensureVisibleStaves(score);
     // 줄·프렛이 없는 음이 섞인 TAB은 그리지 못하므로 어떤 파일이든 열 때 한 번 고친다
     if (tr.repairStringedNotes(score)) score = tr.cloneScore(score, this.settings);
@@ -279,6 +322,8 @@ export class App {
     score.stylesheet.hideDynamics = !tr.hasDynamics(score);
     // 원본 악보 줄바꿈 정보가 있으면(인식 결과) 원본과 같은 자리에서 줄을 바꾼다
     this.modelLayout = tr.layoutFromLineBreaks(score) || score.systemsLayout.length > 0;
+    // 줄바꿈 정보가 없으면 한 줄에 4마디(alphaTab 기본 3마디는 밴드 악보에 너무 성김)
+    if (!this.modelLayout && score.defaultSystemsLayout === 3 && score.tracks.every((t) => t.defaultSystemsLayout === 3)) tr.setBarsPerLine(score, 4);
     this.applyLayoutMode();
     this.newDoc(score, name);
     this.render();
@@ -288,13 +333,36 @@ export class App {
   /** 원본 줄바꿈 정보가 있는 악보인지 (인식 결과) */
   private modelLayout = false;
 
+  /** 마디 너비: 'even' 한 줄의 마디를 같은 너비로(기본, 마디마다 넓게·좁게 조절 가능), 'auto' 음표 양에 맞춰 */
+  private barWidth: 'even' | 'auto' = (() => {
+    try {
+      return localStorage.getItem('band-score.barWidth') === 'auto' ? 'auto' : 'even';
+    } catch {
+      return 'even';
+    }
+  })();
+
+  private setBarWidthMode(mode: 'even' | 'auto') {
+    this.barWidth = mode;
+    try {
+      localStorage.setItem('band-score.barWidth', mode);
+    } catch {
+      /* 저장 못 해도 이번 실행에는 적용 */
+    }
+    this.applyLayoutMode();
+    this.render();
+    this.updateMenuState();
+  }
+
   /**
    * 줄바꿈 방식: 원본과 같은 자리에서 줄을 바꾸되, 악보 칸이 좁으면(원본 보기를 켰거나 창이 작을 때, 크게 확대했을 때)
    * 음표가 겹치므로 너비에 맞춰 자동으로 나눈다. 바뀌었으면 true
    */
   private applyLayoutMode(): boolean {
     const width = $('viewport').clientWidth / (this.settings.display.scale || 1);
-    const mode = this.modelLayout && width >= 900 ? SystemsLayoutMode.UseModelLayout : SystemsLayoutMode.Automatic;
+    // '고르게'여도 한 마디가 너무 좁아지면(원본 보기를 켰거나 창이 작을 때) 음표가 겹치므로 너비에 맞춰 자동으로 나눈다
+    const fits = width / tr.maxBarsPerLine(this.doc?.score ?? this.api.score!) >= 150;
+    const mode = this.barWidth === 'even' && fits ? SystemsLayoutMode.UseModelLayout : SystemsLayoutMode.Automatic;
     if (this.settings.display.systemsLayoutMode === mode) return false;
     this.settings.display.systemsLayoutMode = mode;
     this.api.updateSettings();
@@ -323,6 +391,8 @@ export class App {
     this.visible.add(this.cursor.track);
     // 트랙을 복제·나누기·가져오기·지우기 했으면 채널이 겹칠 수 있으므로 그릴 때마다 다시 배정
     tr.assignChannels(score);
+    // 박자에 붙은 악기 설정(인식 결과·서식의 첫 박자 피아노 등)이 트랙 악기를 덮어쓰지 않게 그릴 때마다 지운다
+    tr.clearInstrumentAutomations(score);
     // 튜닝은 표준이 아닐 때만 악보 맨 위에 적는다 (밴드 악보처럼 표준 튜닝 글자는 숨기고, 드롭 D·반음 내림 등은 보이게)
     score.stylesheet.globalDisplayTuning = true;
     score.stylesheet.perTrackDisplayTuning = new Map(
@@ -337,15 +407,46 @@ export class App {
     this.applyLayoutMode();
     // 셈여림을 적은 악보에서만 셈여림 글자를 보인다 (안 적은 악보에 기본값 f가 찍히지 않게)
     score.stylesheet.hideDynamics = !tr.hasDynamics(score);
-    this.api.renderScore(score, [...this.visible].sort((a, b) => a - b));
+    const shownTracks = [...this.visible].sort((a, b) => a - b);
+    this.api.renderScore(this.withBorrowedLyrics(score, shownTracks), shownTracks);
     this.buildTracks();
     this.updateStatus();
     this.updateMenuState();
   }
 
+  /**
+   * 보컬(가사 트랙)을 숨기고 악기만 볼 때는 맨 위 트랙에 가사를 빌려 와 보이게 한다. 화면용 사본에만 적으므로 저장되는 악보는 그대로.
+   * 사본도 트랙·마디·박자 순서가 같아 커서·편집은 그대로 맞는다
+   */
+  private withBorrowedLyrics(score: model.Score, shown: number[]): model.Score {
+    const lyr = tr.lyricTrack(score);
+    if (!lyr || shown.includes(lyr.index) || !shown.length) return score;
+    const copy = tr.cloneScore(score, this.settings);
+    tr.borrowLyrics(copy.tracks[lyr.index], copy.tracks[shown[0]]);
+    return copy;
+  }
+
   /** 렌더된 악보의 트랙 객체 (alphaTab이 재생에 쓰는 것) */
   private liveTrack(i: number): model.Track | null {
     return this.api.score?.tracks[i] ?? null;
+  }
+
+  /**
+   * alphaTab은 재생 데이터를 만들 때 트랙 음량(playbackInfo.volume)을 MIDI 음량 명령으로 박아 넣는다. 그런데 이 프로그램은
+   * 음량 막대를 '배율'(changeTrackVolume)로만 바꾸므로, 음량을 0으로 내려 둔 채 다시 그리면(악기 바꾸기 등) 그 트랙은
+   * 음량 0으로 박혀 막대를 올려도 소리가 나지 않았다. 박힌 음량을 트랙 최대치로 되돌려, 음량은 막대 배율로만 정해지게 한다
+   * (셈여림·페이드처럼 음량이 바뀌는 비율은 그대로 남는다).
+   */
+  private unbakeVolumes(file: midi.MidiFile) {
+    const score = this.api.score;
+    if (!score) return;
+    const full = Math.max(-32768, Math.min(32767, 16 * 8 - 1)) + 1; // alphaTab의 음량 16을 MIDI 값으로
+    const events = file.tracks.length ? file.tracks.flatMap((t) => t.events) : file.events;
+    for (const e of events) {
+      if (!(e instanceof midi.ControlChangeEvent) || e.controller !== midi.ControllerType.VolumeCoarse) continue;
+      const v = score.tracks[e.track]?.playbackInfo.volume ?? 16;
+      e.value = v > 0 ? Math.min(full, Math.round((e.value * 16) / v)) : full;
+    }
   }
 
   private applyMixer() {
@@ -535,7 +636,7 @@ export class App {
 
     if (ctrl && (k.toLowerCase() === 'y' || (e.shiftKey && k.toLowerCase() === 'z'))) return handled(), this.cmd('redo');
     if (ctrl && k.toLowerCase() === 'z') return handled(), this.cmd('undo');
-    if (ctrl && k.toLowerCase() === 's') return handled(), this.cmd('save');
+    if (ctrl && k.toLowerCase() === 's') return handled(), this.cmd(e.shiftKey ? 'save-as' : 'save');
     if (ctrl && k.toLowerCase() === 'o') return handled(), this.cmd('open');
     if (ctrl && k.toLowerCase() === 'n') return handled(), this.cmd('new');
     if (ctrl && k.toLowerCase() === 'p') return handled(), this.cmd('print');
@@ -545,8 +646,10 @@ export class App {
     if (k === 'F9') return handled(), this.cmd('fit-bar');
     if (k === 'Escape') {
       if (this.sel) return this.setSelection(null);
+      this.playFrom = '';
       return this.api.stop();
     }
+    if (ctrl && (k === ']' || k === '[')) return handled(), this.cmd(k === ']' ? 'bar-wider' : 'bar-narrower');
     if (ctrl && k.toLowerCase() === 'c') return handled(), this.cmd('copy');
     if (ctrl && k.toLowerCase() === 'x') return handled(), this.cmd('cut');
     if (ctrl && k.toLowerCase() === 'v') return handled(), this.cmd(e.shiftKey ? 'paste-insert' : 'paste');
@@ -637,8 +740,15 @@ export class App {
         return this.typeLetter(upper, e.shiftKey);
       }
       const tech = ed.techniquesFor(kind).find((t) => t.key === upper);
-      if (tech) return handled(), commit(tech.label, (s) => ed.toggleTechnique(s, c, tech.id));
+      if (tech) return handled(), this.toggleTech(tech.id, tech.label);
     }
+  }
+
+  /** 기법 켜기·끄기. 붙임줄처럼 걸 수 없는 자리면 까닭을 알린다 */
+  private toggleTech(id: ed.Technique, label: string) {
+    const c = this.cursor;
+    const why = this.doc.tryCommit(label, (s) => ed.toggleTechnique(s, c, id));
+    if (why) toast(why, 4000);
   }
 
   private typeFret(digit: string) {
@@ -987,6 +1097,52 @@ export class App {
     };
     set('undo', this.doc.canUndo);
     set('redo', this.doc.canRedo);
+    for (const [cmd, on] of [['bar-width-even', this.barWidth === 'even'], ['bar-width-auto', this.barWidth === 'auto']] as const)
+      document.querySelector(`[data-cmd="${cmd}"]`)?.classList.toggle('checked', on);
+  }
+
+  /** 고른 마디(없으면 커서 마디)의 너비를 바꾼다. factor가 null이면 원래대로 */
+  private scaleBars(factor: number | null) {
+    const from = this.sel ? this.sel.from : this.cursor.bar;
+    const to = this.sel ? this.sel.to : this.cursor.bar;
+    // 너비 조절은 '고르게' 방식에서만 보이므로, '내용에 맞춰'였으면 바꾼다
+    if (this.barWidth !== 'even') {
+      this.barWidth = 'even';
+      try {
+        localStorage.setItem('band-score.barWidth', 'even');
+      } catch {
+        /* 무시 */
+      }
+      this.applyLayoutMode();
+    }
+    this.doc.commit(factor === null ? '마디 너비 원래대로' : factor > 1 ? '마디 넓게' : '마디 좁게', (s) => tr.scaleBarWidth(s, from, to, factor));
+    const w = Math.round(this.doc.score.masterBars[from].displayScale * 100);
+    toast(`${from + 1}${to > from ? `~${to + 1}` : ''}마디 너비 ${w}% (같은 줄의 다른 마디에 견준 비율)`);
+    this.updateMenuState();
+  }
+
+  private async barsPerLineDialog() {
+    const score = this.doc.score;
+    const now = score.systemsLayout.length ? 0 : score.defaultSystemsLayout;
+    const r = await showDialog(
+      '한 줄 마디 수',
+      `<p>한 줄에 놓을 마디 수를 정합니다. 마디 너비는 '고르게'로 바뀝니다.</p>
+       ${score.systemsLayout.length ? '<p class="note">지금은 원본 악보의 줄바꿈을 따르고 있습니다. 정하면 원본 줄바꿈 대신 이 수로 나눕니다.</p>' : ''}
+       <label>마디 수 <input type="number" name="n" min="1" max="12" value="${now || 4}" style="width:5em"></label>`,
+      '적용',
+    );
+    if (!r) return;
+    const n = Math.max(1, Math.min(12, Math.round(Number(r.get('n')) || 4)));
+    this.barWidth = 'even';
+    try {
+      localStorage.setItem('band-score.barWidth', 'even');
+    } catch {
+      /* 무시 */
+    }
+    this.doc.commit('한 줄 마디 수', (s) => tr.setBarsPerLine(s, n));
+    this.modelLayout = true;
+    if (this.applyLayoutMode()) this.render();
+    this.updateMenuState();
   }
 
   async cmd(name: string) {
@@ -1004,7 +1160,6 @@ export class App {
         case 'save':
           return await this.save(false);
         case 'save-as':
-          return await this.save(true);
         case 'export':
           return await this.exportDialog();
         case 'export-xml':
@@ -1013,10 +1168,24 @@ export class App {
           return await this.exportGp();
         case 'info':
           return await this.infoDialog();
+        case 'claude':
+          return await this.claudeDialog();
         case 'repeat':
           return await this.repeatDialog();
         case 'meter':
           return await this.meterDialog();
+        case 'bar-width-even':
+          return this.setBarWidthMode('even');
+        case 'bar-width-auto':
+          return this.setBarWidthMode('auto');
+        case 'bars-per-line':
+          return await this.barsPerLineDialog();
+        case 'bar-wider':
+          return this.scaleBars(1.25);
+        case 'bar-narrower':
+          return this.scaleBars(0.8);
+        case 'bar-width-reset':
+          return this.scaleBars(null);
         case 'insert-bar':
           this.doc.commit('마디 넣기', (s) => ed.insertBar(s, this.cursor.bar));
           return toast(`${this.cursor.bar + 1}번째 마디 앞에 빈 마디를 넣었습니다.`);
@@ -1076,6 +1245,10 @@ export class App {
         }
         case 'add-track':
           return await this.addTrackDialog();
+        case 'accomp':
+          return await this.accompDialog();
+        case 'guess-chords':
+          return void (await this.guessChords());
         case 'copy':
         case 'cut': {
           const { from, to } = this.sel ?? { from: this.cursor.bar, to: this.cursor.bar };
@@ -1198,7 +1371,7 @@ export class App {
     if (f.path && isNative(f.name, f.data)) this.docPath = f.path;
   }
 
-  private async recognizeAndOpen(f: OpenedFile) {
+  private async recognizeAndOpen(f: OpenedFile, quiet = false) {
     if (!isDesktop()) {
       await info('PDF 인식', '<p>PDF·사진 인식은 exe 프로그램에서만 됩니다. 지금은 개발용 브라우저 화면입니다.</p>');
       return;
@@ -1211,6 +1384,8 @@ export class App {
       // 원본을 옆에 띄워 바로 대조할 수 있게
       if (result.source) await this.setSource({ path: result.source, name: f.name, systems: result.systems ?? [] }, true);
       const problems = this.problemCount();
+      // AI 도구가 연 것은 완료 창을 띄우지 않는다 (창을 닫을 때까지 도구가 기다리게 되므로)
+      if (quiet) return toast(`인식 완료: 트랙 ${score.tracks.length}개, ${score.masterBars.length}마디${problems ? `, 박자 안 맞는 마디 ${problems}개` : ''}`, 5000);
       await info(
         '인식 완료',
         `<p>트랙 ${score.tracks.length}개, ${score.masterBars.length}마디를 인식했습니다.</p>
@@ -1273,17 +1448,21 @@ export class App {
 
   private async exportDialog() {
     const r = await showDialog(
-      '내보내기',
+      '다른 이름으로 저장',
       `<div class="field"><span>파일 형식</span>
-        <label class="check"><input type="radio" name="fmt" value="gp" checked> <b>Guitar Pro</b> (.gp) — Guitar Pro 7·8, 휴대폰 기타프로 앱</label>
+        <label class="check"><input type="radio" name="fmt" value="bscore" checked> <b>밴드 악보 편집기</b> (.bscore) — 편집한 내용을 빠짐없이 저장 (다시 열어 고칠 때)</label>
+        <label class="check"><input type="radio" name="fmt" value="gp"> <b>Guitar Pro</b> (.gp) — Guitar Pro 7·8, 휴대폰 기타프로 앱</label>
         <label class="check"><input type="radio" name="fmt" value="musicxml"> <b>MusicXML</b> (.musicxml) — MuseScore, Sibelius, Finale</label>
         <label class="check"><input type="radio" name="fmt" value="mid"> <b>MIDI</b> (.mid) — 반주 음원, 다른 음악 프로그램</label>
         <label class="check"><input type="radio" name="fmt" value="pdf"> <b>PDF·인쇄</b> — 학생에게 나눠 줄 파트보</label>
-      </div>`,
-      '내보내기',
+      </div>
+      <p class="note">.bscore가 아닌 형식은 일부 정보(트랙별 조표, 원본 보기 등)가 빠질 수 있어, 저장 안 한 변경 표시(●)는 그대로 남습니다.</p>`,
+      '저장',
     );
     if (!r) return;
     switch (String(r.get('fmt'))) {
+      case 'bscore':
+        return await this.save(true);
       case 'gp':
         return await this.exportGp();
       case 'musicxml':
@@ -1360,6 +1539,106 @@ export class App {
     this.visible.add(score.tracks.length - 1);
     this.cursor = { ...this.cursor, track: score.tracks.length - 1, staff: 0, voice: 0, beat: 0 };
     this.render();
+  }
+
+  /** 반주 파트 만들기: 다른 파트의 코드 이름으로 키보드 반주 트랙을 새로 만든다 */
+  /**
+   * 코드 이름 추정해 적기: 코드 이름이 하나도 없는 마디에 악보의 음으로 짐작한 코드 이름을 적는다(맨 위 음 있는 트랙에).
+   * 적은 수를 돌려준다. ask면 먼저 묻는다
+   */
+  private async guessChords(ask = true): Promise<number> {
+    const s = this.doc.score;
+    const target = s.tracks.find((t) => !t.isPercussion && !t.staves.some((st) => st.isPercussion));
+    if (!target) {
+      toast('코드 이름을 적을 트랙(드럼이 아닌 트랙)이 없습니다.');
+      return 0;
+    }
+    if (ask) {
+      const r = await choose(
+        '코드 이름 추정해 적기',
+        `<p>코드 이름이 없는 마디에, 그 마디에서 울리는 음(베이스·기타·키보드 등)으로 짐작한 코드 이름을 <b>${esc(target.name)}</b> 트랙 위에 적습니다.</p>
+         <p class="note">실제 코드 이름이 있는 밴드 악보 5곡으로 시험해 보니 근음과 장·단조가 맞는 비율은 60% 안팎이었습니다. 적은 뒤 꼭 원본·소리와 대조해 고쳐 주세요(코드 단추로 고치기). Ctrl+Z로 되돌릴 수 있습니다.</p>`,
+        [
+          { value: 'cancel', label: '취소' },
+          { value: 'go', label: '추정해 적기', primary: true },
+        ],
+      );
+      if (r !== 'go') return 0;
+    }
+    const has = new Set(acc.chordTimeline(s).map((e) => e.bar));
+    const events = acc.inferChords(s).filter((e) => !has.has(e.bar));
+    if (!events.length) {
+      toast('코드 이름을 적을 마디가 없습니다 (모든 마디에 코드 이름이 있거나 음이 없음).');
+      return 0;
+    }
+    const ti = target.index;
+    const n = this.doc.commit('코드 이름 추정', (sc) => acc.writeChordNames(sc.tracks[ti], events));
+    this.visible.add(ti);
+    this.render();
+    toast(`코드 이름 ${n}개를 추정해 적었습니다. 원본과 대조해 고쳐 주세요.`, 5000);
+    return n;
+  }
+
+  private async accompDialog() {
+    let s = this.doc.score;
+    let timeline = acc.chordTimeline(s);
+    if (!timeline.length) {
+      const r = await choose(
+        '반주 파트 만들기',
+        '<p>악보에 코드 이름(C, Am7, F/A …)이 없습니다. 악보의 음으로 코드 이름을 먼저 추정해 적고 반주를 만들까요?</p><p class="note">추정한 코드는 60% 안팎만 맞으므로, 적힌 코드를 고친 뒤 반주를 만드는 것이 좋습니다.</p>',
+        [
+          { value: 'cancel', label: '취소' },
+          { value: 'guess', label: '코드 추정해 적기', primary: true },
+        ],
+      );
+      if (r !== 'guess' || !(await this.guessChords(false))) return;
+      s = this.doc.score;
+      timeline = acc.chordTimeline(s);
+    }
+    const names = [...new Set(timeline.map((e) => e.name))];
+    const radio = (name: string, items: [string, string][]) =>
+      items.map(([v, l], i) => `<label class="check"><input type="radio" name="${name}" value="${v}" ${i ? '' : 'checked'}> ${l}</label>`).join('');
+    const r = await showDialog(
+      '반주 파트 만들기',
+      `<p>다른 파트에 적힌 코드 이름 ${timeline.length}곳(${esc(names.slice(0, 8).join(', '))}${names.length > 8 ? ' …' : ''})으로
+       반주 트랙을 새로 만듭니다(곡 전체).</p>
+       <div class="field"><span>악기</span>${radio('inst', [
+         ['keys', '키보드 (오른손 가운데 도 근처 화음 + 왼손)'],
+         ['guitar', '기타 (코드 모양, TAB)'],
+         ['bass', '베이스 (근음, TAB)'],
+       ])}</div>
+       <div class="field"><span>리듬</span>${radio('rhythm', [
+         ['sustain', '길게 누르기 (코드가 바뀔 때까지)'],
+         ['quarter', '4분음표로 치기'],
+         ['eighth', '8분음표로 치기'],
+       ])}</div>
+       <div class="field"><span>낮은 음</span>${radio('left', [
+         ['root', '근음 (키보드 왼손·베이스)'],
+         ['octave', '근음 + 옥타브 (키보드는 함께, 베이스는 번갈아)'],
+       ])}</div>
+       <p class="note">분수 코드(C/E)는 낮은 음이 분모 음(E)입니다. 기타는 많이 쓰는 코드 모양(오픈·바레 코드)으로 칩니다. 코드 이름이 없는 마디는 앞 코드를 이어 갑니다. 만든 뒤 마음대로 고칠 수 있고, Ctrl+Z로 되돌릴 수 있습니다.</p>`,
+      '만들기',
+    );
+    if (!r) return;
+    const inst = r.get('inst') as acc.AccompInstrument;
+    const opts: acc.AccompOptions = { rhythm: r.get('rhythm') as acc.AccompRhythm, left: r.get('left') as acc.AccompLeft, instrument: inst };
+    const mb = s.masterBars[0];
+    const part = inst === 'guitar' ? 'guitar2' : inst === 'bass' ? 'bass' : 'keys';
+    const tmpl = createTemplate(
+      { title: s.title, tempo: s.tempo, bars: s.masterBars.length, numerator: mb.timeSignatureNumerator, denominator: mb.timeSignatureDenominator, key: this.currentKey(), parts: [part] },
+      this.settings,
+    );
+    const { score } = tr.mergeTracks(s, tmpl, [0], this.settings);
+    const track = score.tracks[score.tracks.length - 1];
+    track.name = `${inst === 'guitar' ? '기타' : inst === 'bass' ? '베이스' : '키보드'} (반주)`;
+    track.shortName = '반주';
+    const n = acc.fillAccompaniment(score, track, acc.chordTimeline(score, [track]), opts);
+    this.doc.replace('반주 파트 만들기', tr.cloneScore(score, this.settings));
+    const idx = this.doc.score.tracks.length - 1;
+    this.visible.add(idx);
+    this.cursor = { ...this.cursor, track: idx, staff: 0, voice: 0, beat: 0, bar: 0 };
+    this.render();
+    toast(`반주 트랙을 만들었습니다 (${n}마디, 코드 ${names.length}종류). 트랙 ⋯에서 악기·음량을 바꿀 수 있습니다.`, 5000);
   }
 
   private async exportGp() {
@@ -1596,12 +1875,75 @@ export class App {
           s.showTablature = mode !== 'score';
           s.showStandardNotation = mode !== 'tab';
         }
-    for (const g of groups) {
-      if (groups.length > 1) copy.title = `${score.title} - ${copy.tracks[g[0]].name}`;
-      await this.renderAndWait(copy, g);
-      window.print();
+    // 인쇄용으로 다시 그린다: ① 화면 밖 부분도 모두 그리기(지연 그리기 끔 — 켜 두면 안 보이던 줄이 빈 종이로 나옴)
+    // ② A4 너비에 맞춘 폭과 크기(창 너비로 그리면 아주 작게 인쇄됨) ③ 인쇄 창이 닫힌 뒤에 편집 화면으로 되돌림
+    // (exe의 WebView2는 window.print()가 기다리지 않고 바로 돌아와서, 전에는 인쇄 미리보기 도중에 편집 화면을 다시 그려 일부만 나왔다)
+    const lazy = this.settings.core.enableLazyLoading;
+    const scale = this.settings.display.scale;
+    const layout = this.settings.display.systemsLayoutMode;
+    const res = this.settings.display.resources;
+    const titleFont = res.titleFont;
+    // 트랙이 많은 밴드 총보는 한 단이 높아 한 쪽에 한 단만 들어가므로(5트랙이면 30쪽 넘게) 작게 그려 두 단씩 들어가게
+    const printed = Math.max(...groups.map((g) => g.length));
+    const printScale = printed >= 4 ? 0.6 : printed === 3 ? 0.7 : 0.8;
+    // 긴 제목(유튜브 영상 제목 등)은 A4 폭을 넘어 양옆이 잘리므로 글자를 줄인다 (대략 글자 폭 = 크기 × 0.6)
+    const fit = Math.floor(700 / printScale / (Math.max(1, copy.title.length) * 0.6));
+    if (fit < titleFont.size) res.titleFont = titleFont.withSize(Math.max(12, fit));
+    document.body.classList.add('printing');
+    this.settings.core.enableLazyLoading = false;
+    this.settings.display.scale = printScale;
+    // 한 줄 마디 수는 원본대로 두되, A4 폭에서 너무 좁아지면 자동으로 나눈다
+    if (720 / printScale / tr.maxBarsPerLine(copy) < 150) this.settings.display.systemsLayoutMode = SystemsLayoutMode.Automatic;
+    this.api.updateSettings();
+    try {
+      for (const g of groups) {
+        if (groups.length > 1) copy.title = `${score.title} - ${copy.tracks[g[0]].name}`;
+        await this.renderAndWait(copy, g);
+        await this.printAndWait();
+      }
+    } finally {
+      document.body.classList.remove('printing');
+      this.settings.core.enableLazyLoading = lazy;
+      this.settings.display.scale = scale;
+      this.settings.display.systemsLayoutMode = layout;
+      res.titleFont = titleFont;
+      this.api.updateSettings();
+      this.render();
     }
-    this.render();
+  }
+
+  /** 인쇄 창을 띄우고 닫힐 때까지 기다린다 (afterprint가 안 오는 경우를 대비해 화면으로 돌아와 움직이면 끝난 것으로) */
+  private printAndWait(): Promise<void> {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        window.removeEventListener('afterprint', finish);
+        document.querySelectorAll<HTMLElement>('#score .at-surface > *').forEach((el) => (el.style.order = ''));
+        document.removeEventListener('pointermove', late);
+        document.removeEventListener('keydown', late);
+        resolve();
+      };
+      const started = Date.now();
+      // 미리보기 창이 떠 있는 동안에는 이 화면에 마우스·키 입력이 오지 않는다
+      const late = () => {
+        if (Date.now() - started > 1500) finish();
+      };
+      window.addEventListener('afterprint', finish);
+      // alphaTab은 악보를 조각(대개 한 단씩)으로 나눠 절대 위치로 겹쳐 놓는다. 그대로 인쇄하면 쪽이 나뉘는 자리에서
+      // 조각이 겹치거나 빈 쪽이 생겼다(트랙이 많아 단이 높은 밴드 총보에서). 인쇄할 때는 위에서부터 차례로 흐르게 놓고 단 중간에서 쪽이 나뉘지 않게
+      // (alphaTab은 조각을 페이지 안 순서로 다시 쓰고 지우므로 요소를 옮기지 않고 CSS order만 매긴다)
+      const parts = [...document.querySelectorAll<HTMLElement>('#score .at-surface > *')];
+      [...parts]
+        .sort((a, b) => parseFloat(a.style.top || '0') - parseFloat(b.style.top || '0') || parseFloat(a.style.left || '0') - parseFloat(b.style.left || '0'))
+        .forEach((el, i) => (el.style.order = String(i)));
+      setTimeout(() => {
+        document.addEventListener('pointermove', late);
+        document.addEventListener('keydown', late);
+      }, 1500);
+      window.print();
+    });
   }
 
   private renderAndWait(score: model.Score, tracks: number[]): Promise<void> {
@@ -1611,7 +1953,7 @@ export class App {
         setTimeout(resolve, 200);
       };
       this.api.postRenderFinished.on(done);
-      this.api.renderScore(score, tracks);
+      this.api.renderScore(this.withBorrowedLyrics(score, tracks), tracks);
     });
   }
 
@@ -1634,7 +1976,8 @@ export class App {
       ['R (드럼은 Ctrl+R)', '쉼표로 바꾸기'],
       ['Delete', '커서의 음 지우기'],
       ['Ctrl + Delete', '박자 지우기'],
-      ['Ctrl + Shift + Delete', '마디 지우기 (모든 트랙에서. Shift+→로 고른 구간이 있으면 그 마디들 전부)'],
+      ['Ctrl + ] / Ctrl + [', '고른 마디(없으면 커서 마디) 넓게 / 좁게'],
+      ['Ctrl + Shift + Delete', '마디 지우기 (모든 트랙에서. 마우스로 끌거나 Shift+→로 고른 구간이 있으면 그 마디들 전부)'],
       ['Ctrl + X', '고른 마디의 음 잘라내기 (마디 자체는 남음)'],
       ['Insert', '앞에 박자 넣기'],
       ['L', '붙임줄'],
@@ -1645,6 +1988,7 @@ export class App {
       ['Space', '재생 / 멈춤 (커서 위치부터)'],
       ['Ctrl + Z / Y', '실행 취소 / 다시 실행'],
       ['Ctrl + S', '저장'],
+      ['Ctrl + Shift + S', '다른 이름으로 저장 (.bscore·Guitar Pro·MusicXML·MIDI·PDF 중 형식 고르기)'],
       ['Ctrl + N / O / P', '새 악보 / 열기 / 인쇄'],
       ['Shift + ← →', '마디 단위로 구간 고르기'],
       ['Ctrl + C / X / V', '고른 마디(없으면 커서 마디) 복사 / 잘라내기 / 붙여넣기(덮어쓰기)'],
@@ -1668,7 +2012,7 @@ export class App {
       if (!b) return;
       const c = this.cursor;
       if (b.dataset.dur) return this.setInputDuration(Number(b.dataset.dur) as model.Duration);
-      if (b.dataset.tech) return this.doc.commit('기법', (s) => ed.toggleTechnique(s, c, b.dataset.tech as ed.Technique));
+      if (b.dataset.tech) return this.toggleTech(b.dataset.tech as ed.Technique, '기법');
       if (b.dataset.dyn) {
         const v = Number(b.dataset.dyn) as model.DynamicValue;
         const n = this.doc.commit('셈여림', (s) => ed.setDynamics(s, c, v));
@@ -1755,36 +2099,58 @@ export class App {
   }
 
     private async repeatDialog() {
-    const bar = this.cursor.bar;
-    const cur = ed.getBarRepeat(this.doc.score, bar);
+    // 마디 구간을 골랐으면(끌기·Shift+→) 괄호는 구간 전체에, 도돌이 시작은 첫 마디·끝은 마지막 마디에 건다.
+    // 1번 괄호가 여러 마디일 때(예: 39~46마디가 1번 괄호, 46마디 끝에서 도돌이) 한 번에 표시하려고
+    const from = this.sel ? this.sel.from : this.cursor.bar;
+    const to = this.sel ? this.sel.to : this.cursor.bar;
+    const range = to > from;
+    const first = ed.getBarRepeat(this.doc.score, from);
+    const last = ed.getBarRepeat(this.doc.score, to);
+    const all = Array.from({ length: to - from + 1 }, (_, i) => ed.getBarRepeat(this.doc.score, from + i));
     const counts = [0, 2, 3, 4]
-      .map((n) => `<option value="${n}" ${cur.repeatEnd === n || (n === 2 && cur.repeatEnd === 1) ? 'selected' : ''}>${n === 0 ? '없음' : `여기서 처음으로 (총 ${n}번 연주)`}</option>`)
+      .map((n) => `<option value="${n}" ${last.repeatEnd === n || (n === 2 && last.repeatEnd === 1) ? 'selected' : ''}>${n === 0 ? '없음' : `여기서 처음으로 (총 ${n}번 연주)`}</option>`)
       .join('');
     const endings = [1, 2, 3]
-      .map((n) => `<label class="check"><input type="checkbox" name="ending" value="${n}" ${cur.endings.includes(n) ? 'checked' : ''}> ${n}번 괄호</label>`)
+      .map((n) => `<label class="check"><input type="checkbox" name="ending" value="${n}" ${all.every((b) => b.endings.includes(n)) ? 'checked' : ''}> ${n}번 괄호</label>`)
       .join('');
     const dirs = ed.DIRECTIONS.map(
-      (d) => `<label class="check"><input type="checkbox" name="dir" value="${d.value}" ${cur.directions.includes(d.value) ? 'checked' : ''}> ${esc(d.label)}</label>`,
+      (d) => `<label class="check"><input type="checkbox" name="dir" value="${d.value}" ${first.directions.includes(d.value) ? 'checked' : ''}> ${esc(d.label)}</label>`,
     ).join('');
+    const where = range ? `${from + 1}~${to + 1}번째 마디` : `${from + 1}번째 마디`;
     const r = await showDialog(
-      `반복 기호: ${bar + 1}번째 마디`,
-      `<label class="check"><input type="checkbox" name="start" ${cur.repeatStart ? 'checked' : ''}> 도돌이표 시작 (𝄆, 이 마디부터 되풀이)</label>
-      <label class="field"><span>도돌이표 끝 (𝄇, 이 마디 끝에서)</span><select name="end">${counts}</select></label>
-      <div class="field"><span>괄호 (1번·2번 마디: 몇 번째 연주에서 이 마디를 칠지)</span>${endings}</div>
-      <div class="field"><span>건너뛰기 표시</span>${dirs}</div>
-      <label class="field"><span>구간 이름 (예: A, 전주, 1절, 후렴 / 비우면 지움)</span><input name="section" value="${esc(cur.section)}"></label>
-      <p class="note">반복 기호는 모든 트랙에 같이 적용되고, 재생할 때도 반복대로 연주됩니다.</p>`,
+      `반복 기호: ${where}`,
+      `<label class="check"><input type="checkbox" name="start" ${first.repeatStart ? 'checked' : ''}> 도돌이표 시작 (𝄆, ${from + 1}번째 마디부터 되풀이)</label>
+      <label class="field"><span>도돌이표 끝 (𝄇, ${to + 1}번째 마디 끝에서)</span><select name="end">${counts}</select></label>
+      <div class="field"><span>괄호 (몇 번째 연주에서 ${range ? '이 마디들을' : '이 마디를'} 칠지${range ? ' — 고른 마디 전체에 하나의 괄호로' : ''})</span>${endings}</div>
+      <div class="field"><span>건너뛰기 표시${range ? ` (${from + 1}번째 마디)` : ''}</span>${dirs}</div>
+      <label class="field"><span>구간 이름 (예: A, 전주, 1절, 후렴 / 비우면 지움)${range ? ` (${from + 1}번째 마디)` : ''}</span><input name="section" value="${esc(first.section)}"></label>
+      <p class="note">반복 기호는 모든 트랙에 같이 적용되고, 재생할 때도 반복대로 연주됩니다.${range ? '' : ' 여러 마디에 걸친 괄호는 마디들을 마우스로 끌어 고른 뒤 여세요.'}</p>`,
       '적용',
     );
     if (!r) return;
-    const next: ed.BarRepeat = {
-      repeatStart: !!r.get('start'),
-      repeatEnd: Number(r.get('end')),
-      endings: r.getAll('ending').map(Number),
-      directions: r.getAll('dir').map(Number) as model.Direction[],
-      section: String(r.get('section') ?? ''),
-    };
-    this.doc.commit('반복 기호', (s) => ed.setBarRepeat(s, bar, next));
+    const start = !!r.get('start');
+    const end = Number(r.get('end'));
+    const ends = r.getAll('ending').map(Number);
+    const directions = r.getAll('dir').map(Number) as model.Direction[];
+    const section = String(r.get('section') ?? '');
+    this.applyRepeat(from, to, { repeatStart: start, repeatEnd: end, endings: ends, directions, section });
+  }
+
+  /** 마디 구간에 반복 기호: 괄호는 구간 전체, 도돌이 시작·건너뛰기·구간 이름은 첫 마디, 도돌이 끝은 마지막 마디 */
+  private applyRepeat(from: number, to: number, next: Partial<ed.BarRepeat>) {
+    const range = to > from;
+    this.doc.commit('반복 기호', (s) => {
+      for (let b = from; b <= to; b++) {
+        const cur = ed.getBarRepeat(s, b);
+        ed.setBarRepeat(s, b, {
+          repeatStart: b === from && next.repeatStart !== undefined ? next.repeatStart : cur.repeatStart,
+          repeatEnd: b === to && next.repeatEnd !== undefined ? next.repeatEnd : range && next.repeatEnd !== undefined ? 0 : cur.repeatEnd,
+          endings: next.endings ?? cur.endings,
+          directions: b === from && next.directions ? next.directions : cur.directions,
+          section: b === from && next.section !== undefined ? next.section : cur.section,
+        });
+      }
+    });
   }
 
   private updatePalette() {
@@ -2183,7 +2549,7 @@ export class App {
       <span id="soundState" class="time"></span>
       <button id="mixNote" class="link warn"></button>`;
     $('playBtn').onclick = () => this.playPause();
-    $('stopBtn').onclick = () => this.api.stop();
+    $('stopBtn').onclick = () => ((this.playFrom = ''), this.api.stop());
     const bpm = $('bpm') as HTMLInputElement;
     bpm.onchange = () => this.setBpm(Number(bpm.value));
     $('bpmDown').onclick = () => this.setBpm(this.currentBpm() - 5);
@@ -2235,11 +2601,68 @@ export class App {
     reset.textContent = `원래 ♩=${base}`;
   }
 
+  /**
+   * alphaTab(1.8.4)은 다시 그릴 때마다 악보 조각 수를 0부터 다시 세야 하는데, 그 초기화가 이 프로그램에서는 불리지 않아
+   * 그릴 때마다 조각(단 그림)이 화면에 쌓이기만 했다(5트랙 104마디 총보에서 한 번에 105개씩, 몇 번 고치면 천 개 넘게).
+   * 보이지는 않아도 쪽 높이를 늘리고, 인쇄하면 예전 조각들이 겹쳐 찍혀 단이 겹치고 빈 쪽이 생겼다.
+   * 그리기 시작할 때 직접 초기화한다 → 조각을 다시 쓰고, 다 그리면 남는 조각을 alphaTab이 지운다
+   */
+  private resetRenderSlots() {
+    const ui = this.api.uiFacade as unknown as { _totalResultCount?: number; _resultIdToElementLookup?: Map<unknown, unknown>; _barToElementLookup?: Map<unknown, unknown> };
+    if (typeof ui._totalResultCount !== 'number') return;
+    ui._totalResultCount = 0;
+    ui._resultIdToElementLookup?.clear();
+    ui._barToElementLookup?.clear();
+  }
+
+  /** 재생 중에만 커서가 있는 줄로 화면을 옮기는 스크롤 (멈춰 있을 때 편집·다시 그리기로 화면이 움직이지 않게) */
+  private playScroll() {
+    let last = -1;
+    const scrollTo = (b: { barBounds: { masterBarBounds: { realBounds: { y: number } } } }, force: boolean) => {
+      const y = b.barBounds.masterBarBounds.realBounds.y;
+      if (!force && y === last) return;
+      last = y;
+      const ui = this.api.uiFacade;
+      const scroll = ui.getScrollContainer();
+      const offset = ui.getOffset(scroll, this.api.container);
+      ui.scrollToY(scroll, offset.y + y + this.settings.player.scrollOffsetY, this.settings.player.scrollSpeed);
+    };
+    this.api.playerStateChanged.on((e) => {
+      // 재생을 시작하면 지금 줄로 한 번은 옮긴다 (멈춘 동안 사용자가 다른 곳을 보고 있었을 수 있음)
+      if (e.state === synth.PlayerState.Playing) last = -1;
+    });
+    return {
+      forceScrollTo: (b: Parameters<typeof scrollTo>[0]) => {
+        if (this.api.playerState === synth.PlayerState.Playing) scrollTo(b, true);
+      },
+      onBeatCursorUpdating: (b: Parameters<typeof scrollTo>[0]) => {
+        if (this.api.playerState === synth.PlayerState.Playing) scrollTo(b, false);
+      },
+      [Symbol.dispose]: () => {},
+    } as unknown as NonNullable<AlphaTabApi['customScrollHandler']>;
+  }
+
+  /** 마지막으로 재생을 시작한 커서 자리 (멈춤 뒤 커서를 안 옮겼으면 멈춘 곳부터 이어서) */
+  private playFrom = '';
+
   private playPause() {
-    if (this.api.playerState !== synth.PlayerState.Playing && !this.api.playbackRange) {
-      // 커서 위치부터 재생
-      const live = this.liveBeat(this.cursor);
-      if (live) this.api.tickPosition = live.absolutePlaybackStart;
+    if (this.api.playerState !== synth.PlayerState.Playing) {
+      const c = this.cursor;
+      const key = `${c.track}/${c.staff}/${c.bar}/${c.voice}/${c.beat}/${this.doc.revision}`;
+      const live = this.liveBeat(c);
+      const cache = this.api.tickCache;
+      // absolutePlaybackStart는 악보 순서의 위치라 도돌이표 뒤 마디에서는 실제 재생 위치(펼친 순서)와 어긋난다.
+      // 재생 데이터의 위치표(tickCache)에서 그 박자가 처음 연주되는 자리를 찾는다 (없으면 악보 순서 위치)
+      const t = live ? (cache?.getBeatStart(live) || live.absolutePlaybackStart) : 0;
+      const range = this.api.playbackRange;
+      // 끌어서 고른 재생 구간이 있어도, 커서를 그 구간 밖으로 옮겼으면 구간을 풀고 커서부터 재생한다
+      if (range && live && (t < range.startTick || t > range.endTick)) {
+        this.api.playbackRange = null;
+        this.api.clearPlaybackRangeHighlight();
+      }
+      const paused = this.api.playerState === synth.PlayerState.Paused && this.api.tickPosition > 0;
+      if (live && !this.api.playbackRange && !(paused && key === this.playFrom)) this.api.tickPosition = t;
+      this.playFrom = key;
     }
     this.api.playPause();
   }
@@ -2251,6 +2674,238 @@ export class App {
   private updateTime(cur: number, end: number) {
     const f = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`;
     $('time').textContent = `${f(cur)} / ${f(end)}`;
+  }
+
+  // ---------- AI 도구 (MCP: Claude가 이 편집기를 조작) ----------
+  // exe 안의 연결 서버가 받은 요청을 화면이 차례로 가져와 처리한다. 모든 변경은 실행 취소할 수 있는 편집으로 하고,
+  // 바꾼 마디로 커서를 옮겨 사용자가 바로 보게 한다.
+
+  private mcpRunning = false;
+
+  /** Claude 연결 안내: Claude 데스크톱은 .mcpb 한 번에 설치, Claude Code는 명령 한 줄 */
+  private async claudeDialog() {
+    if (!isDesktop()) return void (await info('Claude 연결하기', '<p>Claude 연결은 exe 프로그램에서만 됩니다.</p>'));
+    const m = await window.pywebview!.api.mcp_info();
+    const cmd = m.server ? `claude mcp add band-score -- node "${m.server}"` : '';
+    const r = await choose(
+      'Claude(AI) 연결하기',
+      `<p>연결하면 Claude에게 <b>"열린 악보를 원본과 비교해서 61마디부터 고쳐 줘"</b>처럼 부탁할 수 있습니다.
+       Claude가 원본 그림을 보고 마디를 읽고 고치며, 바뀐 내용은 이 창에 바로 보이고 <b>Ctrl+Z</b>로 되돌릴 수 있습니다.</p>
+       <p><b>Claude 데스크톱 앱</b>: 아래 <b>설치</b>를 누르면 Claude 데스크톱의 설치 창이 뜹니다(한 번만). 그 뒤 Claude 데스크톱에서 새 대화를 시작하세요.</p>
+       ${cmd ? `<p><b>Claude Code</b>(Node 필요): 터미널에서 한 번 실행<br><code style="user-select:all;word-break:break-all">${esc(cmd)}</code></p>` : ''}
+       <p class="note">이 편집기가 켜져 있어야 합니다(꺼져 있으면 Claude가 켭니다). Claude가 원본을 볼 때 악보 그림이 Claude(Anthropic)로 전송됩니다.</p>`,
+      [
+        { value: 'close', label: '닫기' },
+        ...(cmd ? [{ value: 'copy', label: 'Claude Code 명령 복사' }] : []),
+        ...(m.mcpb ? [{ value: 'install', label: '설치 (Claude 데스크톱)', primary: true }] : []),
+      ],
+    );
+    if (r === 'install' && m.mcpb) {
+      if (!(await window.pywebview!.api.open_path_in_shell(m.mcpb))) toast('설치 파일을 열지 못했습니다. Claude 데스크톱이 설치돼 있는지 확인하세요.', 5000);
+    } else if (r === 'copy') {
+      await navigator.clipboard.writeText(cmd).then(
+        () => toast('복사했습니다. 터미널에 붙여 넣어 실행하세요.'),
+        () => toast(cmd, 10000),
+      );
+    }
+  }
+
+  private async mcpLoop() {
+    if (this.mcpRunning || !isDesktop()) return;
+    this.mcpRunning = true;
+    for (;;) {
+      let req: McpRequest | null = null;
+      try {
+        req = await mcpWait();
+      } catch {
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+      if (!req) continue;
+      let result: McpResult;
+      try {
+        result = await this.mcpCall(req.tool, req.args ?? {});
+      } catch (e) {
+        result = { error: (e as Error).message || String(e) };
+      }
+      try {
+        await mcpReply(req.id, result);
+      } catch (e) {
+        console.warn('AI 도구 응답 실패', e);
+      }
+    }
+  }
+
+  private mcpTrack(args: Record<string, unknown>): number {
+    const t = args.track === undefined ? this.cursor.track : Number(args.track);
+    if (!Number.isInteger(t) || !this.doc.score.tracks[t]) throw new Error(`트랙 ${String(args.track)}이 없습니다. get_status로 트랙 번호를 확인하세요.`);
+    return t;
+  }
+
+  /** 마디 번호(1부터)를 0부터 세는 순번으로, 범위 확인 */
+  private mcpBar(v: unknown, name: string): number {
+    const n = Number(v);
+    const total = this.doc.score.masterBars.length;
+    if (!Number.isInteger(n) || n < 1 || n > total) throw new Error(`${name}: 1~${total} 사이의 마디 번호가 필요합니다.`);
+    return n - 1;
+  }
+
+  private showBarToUser(track: number, bar: number) {
+    this.moveTo({ ...this.cursor, track, staff: 0, bar, voice: 0, beat: 0 });
+  }
+
+  async mcpCall(tool: string, args: Record<string, unknown>): Promise<McpResult> {
+    const score = () => this.doc.score;
+    switch (tool) {
+      case 'get_status': {
+        const s = score();
+        const tracks = s.tracks.map((t) => {
+          const st = t.staves[0];
+          const kind = st.isPercussion
+            ? '드럼'
+            : st.isStringed
+              ? `${st.tuning.length}현 TAB (줄 1 = ${pitchName(st.tuning[0])} … 줄 ${st.tuning.length} = ${pitchName(st.tuning[st.tuning.length - 1])}${st.capo ? `, 카포 ${st.capo}` : ''})`
+              : '오선';
+          const bad = ed.problemBars(s, t.index);
+          return `- 트랙 ${t.index}: "${t.name}" ${kind}${t.staves.length > 1 ? `, 오선 ${t.staves.length}개` : ''}${bad.length ? `, 박자 안 맞는 마디: ${bad.map((b) => b + 1).join(' ')}` : ''}`;
+        });
+        let source = '없음';
+        if (this.source) {
+          let pages = '?';
+          try {
+            pages = String((await pageImage(this.source.path, -1)).pages);
+          } catch {
+            /* 원본 파일이 없어졌을 수 있다 */
+          }
+          source = `${this.source.name} (${pages}쪽${this.source.systems.length ? `, 단 ${this.source.systems.length}개의 마디 위치를 앎 → original_image에 bar로` : ', 마디 위치 모름 → original_image에 page로 쪽 지정'})`;
+        }
+        return {
+          text: [
+            `파일: ${this.doc.fileName}${this.docPath ? ` (${this.docPath})` : ' (아직 파일로 저장 안 함)'}${this.doc.dirty ? ', 저장 안 한 변경 있음' : ''}`,
+            `제목: ${s.title}, 빠르기 ♩=${s.tempo}, 전체 ${s.masterBars.length}마디`,
+            `트랙:\n${tracks.join('\n')}`,
+            `원본(인식한 PDF·사진): ${source}`,
+            `사용자 커서: 트랙 ${this.cursor.track}, ${this.cursor.bar + 1}마디${this.sel ? `, 고른 구간 ${this.sel.from + 1}~${this.sel.to + 1}마디` : ''}`,
+            '',
+            FORMAT_HELP,
+          ].join('\n'),
+        };
+      }
+      case 'open_file': {
+        const path = String(args.path ?? '');
+        if (!path) throw new Error('path(파일 경로)가 필요합니다.');
+        if (this.doc.dirty && !args.discard_changes)
+          throw new Error(
+            `지금 열린 "${this.doc.fileName}"에 저장 안 한 변경이 있습니다. save로 저장하거나, 버려도 되면 discard_changes: true로 다시 부르세요 (사용자에게 먼저 물어볼 것).`,
+          );
+        const f = await openPath(path);
+        if (!f) throw new Error(`파일을 열 수 없습니다: ${path}`);
+        if (isScan(f.name)) await this.recognizeAndOpen(f, true);
+        else await this.openFileObj(f);
+        return this.mcpCall('get_status', {});
+      }
+      case 'read_bars': {
+        const t = this.mcpTrack(args);
+        const from = this.mcpBar(args.from ?? 1, 'from');
+        const to = this.mcpBar(args.to ?? Math.min(score().masterBars.length, from + 16), 'to');
+        if (to < from) throw new Error('to가 from보다 앞입니다.');
+        const last = Math.min(to, from + 63);
+        return { text: readBars(score(), t, from, last) + (to > last ? `\n# (한 번에 64마디까지. ${last + 2}마디부터 다시 읽으세요)` : '') };
+      }
+      case 'write_bars': {
+        const t = this.mcpTrack(args);
+        const lines = parseBarLines(String(args.text ?? ''));
+        if (!lines.length) throw new Error('text에 "마디번호: 박자 …" 줄이 하나도 없습니다.');
+        for (const l of lines) this.mcpBar(l.bar + 1, `${l.bar + 1}마디`);
+        this.doc.commit(`AI 수정 (${lines.map((l) => l.bar + 1).join('·')}마디)`, (s) => {
+          for (const l of lines) writeBar(s, t, l.staff, l.bar, l.body);
+        });
+        this.showBarToUser(t, lines[0].bar);
+        const bars = [...new Set(lines.map((l) => l.bar))].sort((a, b) => a - b);
+        return { text: `고쳤습니다 (편집기에서 Ctrl+Z로 되돌릴 수 있음).\n${bars.map((b) => `# ${b + 1}마디: ${barHeader(score(), t, b)}`).join('\n')}` };
+      }
+      case 'original_image': {
+        if (!this.source) throw new Error('이 악보에는 원본(인식한 PDF·사진)이 연결돼 있지 않습니다. 편집기에서 "원본 보기"로 원본 파일을 고르게 사용자에게 부탁하세요.');
+        const src = this.source;
+        if (args.page !== undefined) {
+          const img = await pageImage(src.path, Number(args.page) - 1);
+          return { text: `원본 ${Number(args.page)}/${img.pages}쪽`, images: [{ data: img.data, mime: img.mime }] };
+        }
+        if (args.bar === undefined) throw new Error('bar(마디 번호) 또는 page(쪽 번호, 1부터)가 필요합니다.');
+        const bar = this.mcpBar(args.bar, 'bar');
+        const to = args.to !== undefined ? this.mcpBar(args.to, 'to') : bar;
+        if (!src.systems.length) throw new Error('이 원본은 마디 위치를 모릅니다. page로 쪽 전체를 보세요 (get_status에 쪽 수).');
+        const systems = src.systems.filter((x) => x[3] <= to && x[3] + x[4] > bar);
+        if (!systems.length) throw new Error(`${bar + 1}마디가 원본의 어느 단인지 모릅니다. page로 쪽 전체를 보세요.`);
+        const byPage = new Map<number, [number, number]>();
+        for (const x of systems) {
+          const [y0, y1] = this.sourceView.spanOf(src.systems.indexOf(x), src.systems);
+          const cur = byPage.get(x[0]);
+          byPage.set(x[0], cur ? [Math.min(cur[0], y0), Math.max(cur[1], y1)] : [y0, y1]);
+        }
+        const images: { data: string; mime: string }[] = [];
+        const pages: string[] = [];
+        for (const [page, [y0, y1]] of [...byPage].sort((a, b) => a[0] - b[0]).slice(0, 3)) {
+          // 코드 이름·마디 번호가 단 위에 있으므로 위로 넉넉히
+          const img = await pageImage(src.path, page, Math.max(0, y0 - 0.06), Math.min(1, y1 + 0.02));
+          images.push({ data: img.data, mime: img.mime });
+          pages.push(`${page + 1}쪽`);
+        }
+        const lastSys = systems[systems.length - 1];
+        return { text: `원본 ${pages.join(', ')}: 편집기 ${systems[0][3] + 1}~${lastSys[3] + lastSys[4]}마디가 든 단 (원본에 적힌 마디 번호는 다를 수 있음)`, images };
+      }
+      case 'set_repeat': {
+        const from = this.mcpBar(args.from, 'from');
+        const to = args.to !== undefined ? this.mcpBar(args.to, 'to') : from;
+        const next: Partial<ed.BarRepeat> = {};
+        if (args.repeat_start !== undefined) next.repeatStart = !!args.repeat_start;
+        if (args.repeat_end_times !== undefined) next.repeatEnd = Number(args.repeat_end_times);
+        if (args.endings !== undefined) next.endings = (args.endings as unknown[]).map(Number).filter((n) => n >= 1 && n <= 8);
+        if (args.section !== undefined) next.section = String(args.section);
+        this.applyRepeat(from, to, next);
+        this.showBarToUser(this.cursor.track, from);
+        return { text: readBars(score(), this.cursor.track, from, to).split('\n').filter((l) => l.startsWith('#')).join('\n') };
+      }
+      case 'insert_bars': {
+        const at = this.mcpBar(args.before, 'before');
+        const n = Math.max(1, Math.min(64, Number(args.count ?? 1)));
+        this.doc.commit('AI: 마디 넣기', (s) => {
+          for (let i = 0; i < n; i++) ed.insertBar(s, at);
+        });
+        this.showBarToUser(this.cursor.track, at);
+        return { text: `${at + 1}마디 앞에 빈 마디 ${n}개를 넣었습니다. 이제 전체 ${score().masterBars.length}마디.` };
+      }
+      case 'delete_bars': {
+        const from = this.mcpBar(args.from, 'from');
+        const to = args.to !== undefined ? this.mcpBar(args.to, 'to') : from;
+        if (to - from + 1 >= score().masterBars.length) throw new Error('모든 마디를 지울 수는 없습니다.');
+        this.doc.commit('AI: 마디 지우기', (s) => {
+          for (let i = to; i >= from; i--) ed.deleteBar(s, i);
+        });
+        this.setSelection(null);
+        this.showBarToUser(this.cursor.track, Math.min(from, score().masterBars.length - 1));
+        return { text: `${from + 1}~${to + 1}마디(${to - from + 1}개)를 모든 트랙에서 지웠습니다. 이제 전체 ${score().masterBars.length}마디.` };
+      }
+      case 'undo': {
+        if (!this.doc.canUndo) throw new Error('되돌릴 것이 없습니다.');
+        this.doc.undo();
+        return { text: '한 단계 되돌렸습니다.' };
+      }
+      case 'save': {
+        const path = args.path ? String(args.path) : this.docPath;
+        if (!path) throw new Error('아직 저장한 적 없는 악보입니다. path(저장할 .bscore 전체 경로)를 주세요.');
+        if (!/\.bscore$/i.test(path)) throw new Error('save는 .bscore로만 저장합니다 (다른 형식은 사용자가 파일 ▸ 다른 이름으로 저장).');
+        const where = await saveTo(path, saveNative(this.doc.score, { source: this.source ?? undefined }));
+        this.docPath = where;
+        this.doc.fileName = where.split(/[\\/]/).pop()!;
+        this.doc.dirty = false;
+        autosaveClear();
+        $('fileName').textContent = this.doc.fileName;
+        return { text: `저장했습니다: ${where}` };
+      }
+      default:
+        throw new Error(`모르는 도구: ${tool}`);
+    }
   }
 
   // ---------- 상태 표시줄 ----------

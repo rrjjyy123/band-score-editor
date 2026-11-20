@@ -37,7 +37,29 @@ export function loadNative(data: Uint8Array, settings: Settings): model.Score {
   const obj = JSON.parse(new TextDecoder().decode(data), reviver) as { format: string; version: number; score: unknown };
   if (obj.format !== MAGIC) throw new Error('밴드 악보 편집기 파일이 아닙니다.');
   if (obj.version > VERSION) throw new Error('더 새 버전의 프로그램에서 저장한 파일입니다. 프로그램을 업데이트하세요.');
-  return model.JsonConverter.jsObjectToScore(obj.score, settings);
+  return freshIds(model.JsonConverter.jsObjectToScore(obj.score, settings));
+}
+
+/**
+ * 마디·성부·박자·음의 id를 이번 실행에서 새로 받은 값으로 바꾼다.
+ * alphaTab은 id를 '실행마다 0부터 세는' 번호로 매기고, 파일(JSON)에는 저장한 실행의 id가 그대로 들어 있다. 그래서 파일을 연 뒤
+ * 박자·음을 새로 만들면 파일에 있던 id와 겹쳤다 → 재생 커서가 같은 id의 다른 마디로 튀고(커서 위치를 id로 찾음),
+ * 붙임줄·해머온을 다시 만들 때(음 id로 이음) 엉뚱한 음에 이어질 수 있었다. 붙임줄 등은 이미 객체로 이어져 있으므로 id만 바꾸면 된다.
+ */
+export function freshIds(score: model.Score): model.Score {
+  for (const t of score.tracks)
+    for (const st of t.staves)
+      for (const bar of st.bars) {
+        bar.id = new model.Bar().id;
+        for (const v of bar.voices) {
+          v.id = new model.Voice().id;
+          for (const b of v.beats) {
+            b.id = new model.Beat().id;
+            for (const n of b.notes) n.id = new model.Note().id;
+          }
+        }
+      }
+  return score;
 }
 
 export function loadNativeMeta(data: Uint8Array): NativeMeta {

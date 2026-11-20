@@ -79,6 +79,18 @@ describe('도돌이 펼치기', () => {
     expect(playOrder(s)).toEqual([0, 1, 0, 1, 0, 1, 2]);
   });
 
+  it('2번 괄호 마디가 새 도돌이의 시작이면 안쪽 도돌이 두 번 모두 친다', () => {
+    // |: A [1. B :|] [2. |: C D :|] E
+    const s = makeScore([
+      { pitch: 60, repeatStart: true },
+      { pitch: 62, ending: [1], repeatEnd: 2 },
+      { pitch: 64, ending: [2], repeatStart: true },
+      { pitch: 65, repeatEnd: 2 },
+      { pitch: 67 },
+    ]);
+    expect(playOrder(s)).toEqual([0, 1, 0, 2, 3, 2, 3, 4]);
+  });
+
   it('도돌이가 없으면 그대로', () => {
     const s = makeScore([{ pitch: 60 }, { pitch: 62 }]);
     expect(unfoldRepeats(s, settings).score).toBe(s);

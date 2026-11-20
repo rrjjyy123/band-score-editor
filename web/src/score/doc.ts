@@ -76,6 +76,32 @@ export class ScoreDoc {
     return result;
   }
 
+  /**
+   * 바꾸기를 해 보고, 할 수 없다는 까닭(글)을 돌려주면 아무것도 바꾸지 않은 것으로 되돌린다 (실행 취소 기록·다시 그리기 없음).
+   * 바꿨으면 undefined
+   */
+  tryCommit(label: string, mutate: (score: Score) => string | undefined | void): string | undefined {
+    const before = model.JsonConverter.scoreToJsObject(this.score);
+    let why: string | undefined | void;
+    try {
+      why = mutate(this.score);
+    } catch (e) {
+      this.score = model.JsonConverter.jsObjectToScore(before, this.settings);
+      throw e;
+    }
+    if (why) {
+      this.score = model.JsonConverter.jsObjectToScore(before, this.settings);
+      return why;
+    }
+    this.rebuild();
+    this.undoStack.push(before);
+    if (this.undoStack.length > HISTORY_LIMIT) this.undoStack.shift();
+    this.redoStack = [];
+    this.dirty = true;
+    this.emit(label);
+    return undefined;
+  }
+
   /** 다른 악보로 통째로 바꾸기 (합치기 등). 실행 취소 가능 */
   replace(label: string, score: Score) {
     this.undoStack.push(model.JsonConverter.scoreToJsObject(this.score));

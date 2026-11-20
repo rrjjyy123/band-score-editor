@@ -319,6 +319,33 @@ ${beams.map((b) => `<note><pitch><step>E</step><octave>4</octave></pitch><durati
     // 2개씩 묶인 보통 8분음표는 그대로
     expect(desc(b2)).toEqual(['n8', 'n8', 'n8', 'n8', 'n2']);
   });
+  it('쉼표 뒤 박 중간에서 시작하는 8분 3개 빔 묶음은 셋잇단이 아님', () => {
+    // 시험 악보 보컬 34마디: 8분 4개(빔) + 8분쉼표 + 8분 3개(빔) = 4박
+    const e = (beam: string) => `<note><pitch><step>G</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>eighth</type><beam number="1">${beam}</beam></note>`;
+    const xml = `<?xml version="1.0"?><score-partwise version="3.1"><part-list><score-part id="P1"><part-name>Vocal</part-name></score-part></part-list>
+<part id="P1"><measure number="1"><attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+${['begin', 'continue', 'continue', 'end'].map(e).join('')}<note><rest/><duration>2</duration><voice>1</voice><type>eighth</type></note>${['begin', 'continue', 'end'].map(e).join('')}
+</measure></part></score-partwise>`;
+    const s = rebuilt(loadRecognized(new TextEncoder().encode(xml), settings));
+    tr.tidyRecognized(s);
+    const bar = s.tracks[0].staves[0].bars[0];
+    expect(bar.voices[0].beats.every((b) => !(b.tupletNumerator > 1))).toBe(true);
+    expect(bar.voices[0].beats.length).toBe(8);
+    expect(ed.barFill(bar)).toBe(0);
+  });
+  it('끝에서 남는 파트 마디는 붙임줄로 끌기만 하는 마디부터 버림', () => {
+    // 백킹: …, 8분 리듬 마디, 온음표, 온음표(붙임줄 끝) — 기준보다 한 마디 많음. 정렬이 8분 마디를 버렸으면 끝 마디를 버리게
+    const whole = (step: string, tie = '') => `<measure><note><pitch><step>${step}</step><octave>4</octave></pitch><duration>4</duration>${tie}<voice>1</voice><type>whole</type></note></measure>`;
+    const make = (tied: boolean) =>
+      importer.ScoreLoader.loadScoreFromBytes(
+        new TextEncoder().encode(`<?xml version="1.0"?><score-partwise version="3.1"><part-list><score-part id="P1"><part-name>G</part-name></score-part></part-list>
+<part id="P1">${whole('C').replace('<measure>', '<measure><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>')}${whole('D')}${whole('E', tied ? '<tie type="start"/><notations><tied type="start"/></notations>' : '')}${whole('E', tied ? '<tie type="stop"/><notations><tied type="stop"/></notations>' : '')}</part></score-partwise>`),
+        settings,
+      );
+    expect(tr.dropTiedHoldsFirst(make(true), [0, 1, 3])).toEqual([0, 1, 2]);
+    // 붙임줄로 끄는 마디가 없으면 그대로
+    expect(tr.dropTiedHoldsFirst(make(false), [0, 1, 3])).toEqual([0, 1, 3]);
+  });
   it('빗금 머리로 들어온 박자는 빗금 박자(소리는 화음, TAB 숫자는 숨김)', () => {
     const chord = (head: string, dur: number, type: string) =>
       [['G', 2, 6, 3], ['B', 2, 5, 2], ['D', 3, 4, 0]]
@@ -353,6 +380,19 @@ ${chord('', 2, 'quarter')}${chord('<notehead>slash</notehead>', 2, 'quarter')}${
   it('잘못 읽은 15ma 기호는 지움', () => {
     const xml = '<note><pitch><step>E</step><octave>4</octave></pitch></note><direction placement="above"><direction-type><octave-shift type="down" size="15"></octave-shift></direction-type></direction><note/>';
     expect(preprocessRecognizedXml(xml)).toBe('<note><pitch><step>E</step><octave>4</octave></pitch></note><note/>');
+  });
+  it('한 줄 마디 수·마디 너비 비율은 악보와 트랙(한 트랙만 볼 때) 양쪽에 적힘', () => {
+    const s = createDemo(settings);
+    tr.setBarsPerLine(s, 5);
+    expect(s.defaultSystemsLayout).toBe(5);
+    expect(s.tracks.every((t) => t.defaultSystemsLayout === 5 && t.systemsLayout.length === 0)).toBe(true);
+    expect(tr.scaleBarWidth(s, 1, 2, 1.25)).toBe(2);
+    expect(s.masterBars[1].displayScale).toBe(1.25);
+    expect(s.tracks[0].staves[0].bars[2].displayScale).toBe(1.25);
+    tr.scaleBarWidth(s, 1, 1, 100);
+    expect(s.masterBars[1].displayScale).toBe(4);   // 너무 넓게는 못 함
+    tr.scaleBarWidth(s, 0, 3, null);
+    expect(s.masterBars.slice(0, 4).every((m) => m.displayScale === 1)).toBe(true);
   });
   it("'3'을 못 읽어 넘친 마디는 셋잇단만 되살리고 쉼표는 더하지 않음", () => {
     const e = (beam: string) => `<note><pitch><step>C</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice><type>eighth</type><beam number="1">${beam}</beam></note>`;
@@ -469,5 +509,26 @@ describe('파일', () => {
     const at = (d: model.Direction) => s.masterBars.findIndex((mb) => mb.directions?.has(d));
     expect(at(D.JumpDalSegnoAlCoda)).toBe(2);
     expect(s.masterBars.filter((mb) => mb.directions?.has(D.JumpDalSegnoAlCoda)).length).toBe(1);
+  });
+});
+
+describe('파일 열기 뒤 편집', () => {
+  const st = new Settings();
+  it('연 파일의 id와 새로 만든 박자 id가 겹치지 않는다 (재생 커서가 다른 마디로 튀던 것)', () => {
+    const saved = saveNative(createTemplate({ title: 't', tempo: 100, bars: 4, numerator: 4, denominator: 4, key: 0, parts: ['guitar1'] }, st));
+    const s = loadNative(saved, st);
+    const fresh = new model.Beat();
+    const ids = s.tracks.flatMap((t) => t.staves.flatMap((x) => x.bars.flatMap((b) => b.voices.flatMap((v) => v.beats.map((bt) => bt.id)))));
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).not.toContain(fresh.id);
+  });
+
+  it('커서 줄이 빈 박자에서 붙임줄: 박자의 음을 앞 음에 잇는다', () => {
+    const s = createTemplate({ title: 't', tempo: 100, bars: 2, numerator: 4, denominator: 4, key: 0, parts: ['guitar1'] }, st);
+    const c = { track: 0, staff: 0, bar: 0, voice: 0, beat: 0, string: 3 };
+    ed.setFret(s, c, 9, model.Duration.Whole);
+    ed.setFret(s, { ...c, bar: 1 }, 9, model.Duration.Whole);
+    expect(ed.toggleTechnique(s, { ...c, bar: 1, string: 1 }, 'tie')).toBeUndefined();
+    expect(s.tracks[0].staves[0].bars[1].voices[0].beats[0].notes[0].isTieDestination).toBe(true);
   });
 });

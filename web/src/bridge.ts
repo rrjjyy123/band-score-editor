@@ -44,6 +44,11 @@ interface PyApi {
   omr_progress(): Promise<{ stage: string; percent: number }>;
   startup_file(): Promise<{ name: string; data: string } | null>;
   set_dirty(dirty: boolean): Promise<boolean>;
+  mcp_wait(): Promise<unknown>;
+  mcp_result(id: string, result: unknown): Promise<boolean>;
+  page_image(path: string, page: number, y0: number, y1: number): Promise<{ data: string; mime: string; pages: number } | { error: string }>;
+  mcp_info(): Promise<{ mcpb: string | null; server: string | null; node: string | null }>;
+  open_path_in_shell(path: string): Promise<boolean>;
 }
 
 declare global {
@@ -256,4 +261,34 @@ export async function pageImages(path: string): Promise<string[] | null> {
 /** 저장 안 한 변경이 있는지 exe에 알린다 (창을 닫을 때 물어보게) */
 export function tellDirty(dirty: boolean) {
   if (isDesktop()) window.pywebview!.api.set_dirty(dirty).catch(() => {});
+}
+
+// ---------- AI 도구(MCP) 연결 ----------
+
+export interface McpRequest {
+  id: string;
+  tool: string;
+  args: Record<string, unknown>;
+}
+export interface McpResult {
+  text?: string;
+  images?: { data: string; mime: string }[];
+  error?: string;
+}
+
+/** exe가 받아 둔 AI 도구 요청을 하나 기다린다 (없으면 잠시 뒤 null) */
+export async function mcpWait(): Promise<McpRequest | null> {
+  return isDesktop() ? ((await window.pywebview!.api.mcp_wait()) as McpRequest | null) : null;
+}
+
+export async function mcpReply(id: string, result: McpResult): Promise<void> {
+  if (isDesktop()) await window.pywebview!.api.mcp_result(id, result);
+}
+
+/** 원본 쪽 하나를 AI가 읽을 만큼 크게 (y0~y1은 쪽 높이 비율로 자를 범위). pages는 전체 쪽 수 */
+export async function pageImage(path: string, page: number, y0 = 0, y1 = 1): Promise<{ data: string; mime: string; pages: number }> {
+  if (!isDesktop()) throw new Error('원본 그림은 exe 프로그램에서만 볼 수 있습니다.');
+  const r = await window.pywebview!.api.page_image(path, page, y0, y1);
+  if (r && 'error' in r) throw new Error(r.error);
+  return r;
 }

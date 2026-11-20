@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
     "assemble-band": "rolldown scripts/assemble-band.ts --platform node --format esm --file scripts/.out/assemble-band.mjs && node scripts/.out/assemble-band.mjs",
-    "convert-omr": "rolldown scripts/convert-omr.ts --platform node --format esm --file scripts/.out/convert-omr.mjs && node scripts/.out/convert-omr.mjs"
+    "convert-omr": "rolldown scripts/convert-omr.ts --platform node --format esm --file scripts/.out/convert-omr.mjs && node scripts/.out/convert-omr.mjs",
+    "compare-truth": "rolldown scripts/compare-truth.ts --platform node --format esm --file scripts/.out/compare-truth.mjs && node scripts/.out/compare-truth.mjs"
   },
   "dependencies": {
     "@coderline/alphatab": "1.8.4"

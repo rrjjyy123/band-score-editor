@@ -369,10 +369,33 @@ export interface ChangeInstrumentResult {
 }
 
 /** 악기 바꾸기. octave는 같이 옮길 반음 수 (기타→베이스면 -12) */
+/**
+ * 박자에 붙은 '악기 바꾸기' 자동 설정(Automation Instrument)을 지운다. 인식 결과·서식 악보는 첫 박자에 악기(대개 0번
+ * 피아노)를 적어 두는데, 재생할 때 이것이 트랙 악기(playbackInfo.program)를 덮어써 기타·베이스도 피아노 소리가 났다.
+ * 트랙 악기 설정 하나로만 소리를 정한다. 지운 수를 돌려준다
+ */
+export function clearInstrumentAutomations(score: Score, only?: Track): number {
+  let n = 0;
+  for (const t of only ? [only] : score.tracks)
+    for (const st of t.staves)
+      for (const bar of st.bars)
+        for (const v of bar.voices)
+          for (const b of v.beats) {
+            if (!b.automations?.length) continue;
+            const keep = b.automations.filter((a) => a.type !== model.AutomationType.Instrument);
+            if (keep.length !== b.automations.length) {
+              n += b.automations.length - keep.length;
+              b.automations = keep;
+            }
+          }
+  return n;
+}
+
 export function changeInstrument(score: Score, index: number, preset: InstrumentPreset, octave: number): ChangeInstrumentResult {
   const track = score.tracks[index];
   let outOfRange = 0;
   track.playbackInfo.program = preset.program;
+  clearInstrumentAutomations(score, track);
   if (preset.percussion) {
     // 음 높이가 있는 악보는 드럼으로 바꿀 수 없음: 소리만 바꾸지 않고 그대로 둔다
     return { outOfRange };
@@ -563,6 +586,40 @@ export function layoutFromLineBreaks(score: Score): boolean {
   const first = score.tracks.find((t) => t.systemsLayout.length);
   if (first) score.systemsLayout = [...first.systemsLayout];
   return any;
+}
+
+/**
+ * 한 줄에 놓을 마디 수를 정한다(원본 줄바꿈은 지운다). '고르게' 너비에서 쓰인다.
+ * alphaTab은 여러 트랙을 볼 때는 악보 값을, 한 트랙만 볼 때는 트랙 값을 쓰므로 둘 다 바꾼다.
+ */
+export function setBarsPerLine(score: Score, n: number) {
+  score.defaultSystemsLayout = n;
+  score.systemsLayout = [];
+  for (const t of score.tracks) {
+    t.defaultSystemsLayout = n;
+    t.systemsLayout = [];
+  }
+}
+
+/** 한 줄에 놓이는 마디 수의 가장 큰 값(줄바꿈 정보 + 기본값) */
+export function maxBarsPerLine(score: Score): number {
+  return Math.max(score.defaultSystemsLayout, ...score.systemsLayout, 1);
+}
+
+/**
+ * 마디 너비 비율(같은 줄의 다른 마디에 견준 값, 1 = 보통)을 바꾼다. factor가 null이면 1로 되돌린다.
+ * 여러 트랙을 볼 때는 masterBar 값을, 한 트랙만 볼 때는 bar 값을 쓰므로 둘 다 바꾼다. 바꾼 마디 수를 돌려준다.
+ */
+export function scaleBarWidth(score: Score, from: number, to: number, factor: number | null): number {
+  let n = 0;
+  for (let i = Math.max(0, from); i <= Math.min(to, score.masterBars.length - 1); i++) {
+    const mb = score.masterBars[i];
+    const v = factor === null ? 1 : Math.min(4, Math.max(0.25, Math.round(mb.displayScale * factor * 100) / 100));
+    mb.displayScale = v;
+    for (const t of score.tracks) for (const st of t.staves) if (st.bars[i]) st.bars[i].displayScale = v;
+    n++;
+  }
+  return n;
 }
 
 /** 기본값(f)이 아닌 셈여림이 하나라도 적혀 있는지 */
@@ -1105,6 +1162,67 @@ export function setTempo(score: Score, bpm: number) {
  * - 기타·키보드 악보에 같이 실린 보컬 줄은 보컬 파일과 겹치면 뺀다
  * - 기타는 TAB(카포 반영), 베이스는 베이스 TAB으로. 둘 다 악보가 한 옥타브 높게 적히므로 -12
  */
+/** 마지막으로 적힌(빈 칸이 아닌) 박자가 있는 마디 번호. 없으면 -1 */
+function lastWrittenBar(track: Track): number {
+  let last = -1;
+  for (const st of track.staves)
+    st.bars.forEach((bar, i) => {
+      if (bar.voices.some((v) => v.beats.some((b) => !b.isEmpty))) last = Math.max(last, i);
+    });
+  return last;
+}
+
+/**
+ * 한 파트 악보 안 트랙들의 적힌 마디 수가 (거의) 같은지. Audiveris가 한 단에서 보컬 오선의 쉼표 마디 넷을 한 마디로 뭉치면
+ * 보컬 줄은 악기 줄보다 마디가 모자라 뒤가 빈 칸으로 채워진다. 그런 보컬 줄로 마디를 맞추면 악기 파트 전체가 밀린다.
+ */
+function tracksAgree(score: Score): boolean {
+  const lasts = score.tracks.map(lastWrittenBar).filter((x) => x >= 0);
+  return !lasts.length || Math.max(...lasts) - Math.min(...lasts) <= 1;
+}
+
+/** 마디가 앞 마디 화음을 붙임줄로 끌기만 하는지: 성부마다 음이 있는 박자가 하나(마디 처음, 붙임줄 끝 음이 하나는 있음)이고 나머지는 쉼표 */
+function isTiedHold(score: Score, bar: number): boolean {
+  let tied = false;
+  for (const t of score.tracks)
+    for (const st of t.staves) {
+      const b = st.bars[bar];
+      if (!b) continue;
+      for (const v of b.voices) {
+        const sounding = v.beats.filter((beat) => beat.notes.length && !beat.isRest);
+        if (sounding.length > 1 || (sounding.length && sounding[0] !== v.beats[0])) return false;
+        if (sounding.length && !sounding[0].notes.some((n) => n.isTieDestination)) return false;
+        if (sounding.length) tied = true;
+      }
+    }
+  return tied;
+}
+
+/**
+ * 끝 쪽에서 파트 마디가 하나 남을 때(백킹은 마지막 온음표 화음을 한 마디 더 끎) 정렬이 끝 가까이의 진짜 마디를 버렸으면,
+ * 그 마디를 쓰고 대신 뒤의 '붙임줄로 끌기만 하는' 마디를 버린다.
+ */
+export function dropTiedHoldsFirst(score: Score, map: (number | null)[]): (number | null)[] {
+  const out = [...map];
+  const used = new Set(out.filter((v): v is number => v !== null));
+  const n = score.masterBars.length;
+  for (let k = n - 1; k >= Math.max(0, n - 12); k--) {
+    if (used.has(k)) continue;
+    // k 바로 뒤 마디들이 기준 자리에 차례로 놓였고, 그중 붙임줄로 끌기만 하는 마디가 있으면 한 칸씩 밀어 k를 넣는다
+    const pos = out.indexOf(k + 1);
+    if (pos < 1 || out[pos - 1] !== k - 1) continue;
+    let end = pos;
+    while (end + 1 < out.length && out[end + 1] === (out[end] as number) + 1) end++;
+    let hold = -1;
+    for (let q = pos; q <= end; q++) if (isTiedHold(score, out[q] as number)) hold = q;
+    if (hold < 0) continue;
+    for (let q = hold; q > pos; q--) out[q] = out[q - 1];
+    out[pos] = k;
+    used.add(k);
+  }
+  return out;
+}
+
 export function assembleBand(
   parts: PartFile[],
   settings: Settings,
@@ -1151,7 +1269,7 @@ export function assembleBand(
     let a = loose.score >= strict.score + 0.15 ? loose : strict;
     // 파트 악보에 보컬 줄이 같이 실렸으면 그 줄을 보컬 악보와 음 단위로 맞춘 것이 가장 정확하다
     const refVocal = tidied[refIndex].role === 'vocal' ? tidied[refIndex].score.tracks[0] : null;
-    if (refVocal && p.score.tracks.length > 1) {
+    if (refVocal && p.score.tracks.length > 1 && tracksAgree(p.score)) {
       const best = p.score.tracks.map((t) => alignBars(t, refVocal)).sort((x, y) => y.score - x.score)[0];
       if (best.score > 0.35) {
         const used = new Set(best.map.filter((v): v is number => v !== null));
@@ -1167,6 +1285,7 @@ export function assembleBand(
       if (keep >= a.score - 0.05)
         a = { map: ref.map((_, k) => k), confidence: conf, unused: [...Array(features[i].length - ref.length).keys()].map((k) => ref.length + k), score: keep };
     }
+    if (!given) a = { ...a, map: dropTiedHoldsFirst(p.score, a.map) };
     if (given) a = { ...a, map: given };
     const identity = a.map.length === p.score.masterBars.length && a.map.every((v, k) => v === k);
     const applied = !identity && (!!given || a.score >= 0.3);
@@ -1178,16 +1297,20 @@ export function assembleBand(
   const vocalScore = prepared.find((p) => p.role === 'vocal')?.score ?? null;
   const vocal = vocalScore?.tracks[0] ?? null;
   let result: Score | null = null;
+  // 보컬 악보가 없을 때 기타·베이스 악보에 같이 실린 보컬 줄을 보컬 트랙으로 쓴다
+  let promotedVocal: Score | null = null;
   for (const [pi, p] of prepared.entries()) {
     let s = p.score;
     let keep = s.tracks.map((t) => t.index);
     // 기타·베이스·키보드 악보에 같이 실린 보컬 줄을 찾아 보컬 악보와 마디를 맞추고, 그 줄은 뺀다
     if (p.role !== 'vocal' && vocal && vocalScore && s.tracks.length > 1) {
+      const agree = tracksAgree(s);
       const scored = keep.map((i) => ({ i, a: alignBars(s.tracks[i], vocal) })).sort((x, y) => y.a.score - x.a.score);
       const best = scored[0];
       if (best.a.score > 0.35) {
         // 곡 구조 맞추기에서 이미 맞췄으면 다시 옮기지 않는다
-        const shifted = !formAligned.has(pi) && (best.a.map.some((src, i) => src !== i) || s.masterBars.length !== vocalScore.masterBars.length);
+        // 파트 안에서 보컬 줄과 악기 줄의 마디 수가 다르면(인식이 한쪽 마디를 뭉침) 보컬 줄로 옮기지 않는다
+        const shifted = agree && !formAligned.has(pi) && (best.a.map.some((src, i) => src !== i) || s.masterBars.length !== vocalScore.masterBars.length);
         if (shifted) {
           remapBars(s, best.a.map, vocalScore);
           s = cloneScore(s, settings);
@@ -1195,6 +1318,20 @@ export function assembleBand(
         }
         report.dropped.push(`${ROLE_NAMES[p.role]} 악보의 보컬 줄`);
         keep = keep.filter((i) => i !== best.i);
+      }
+    }
+    // 보컬 악보가 없으면: 기타·베이스 악보에서 TAB 없는 줄 중 보컬처럼 보이는 줄(이름이 보컬·멜로디이거나 가사가 있음)은
+    // 기타 2 같은 악기 줄이 아니라 보컬 줄이다. 처음 나온 것을 보컬 트랙으로 올리고 나머지는 뺀다
+    if (!vocal && (p.role === 'guitar' || p.role === 'bass') && keep.length > 1) {
+      const stringed = keep.filter((i) => s.tracks[i].staves.some((st) => st.isStringed && !st.isPercussion));
+      const vocalLike = keep.filter((i) => !stringed.includes(i) && looksVocal(s.tracks[i]));
+      if (stringed.length && vocalLike.length) {
+        const v = vocalLike.reduce((a, b) => (noteCount(s.tracks[b]) > noteCount(s.tracks[a]) ? b : a));
+        if (!promotedVocal) {
+          promotedVocal = extractTracks(s, [v], settings);
+          report.dropped.push(`(보컬 악보가 없어 ${ROLE_NAMES[p.role]} 악보의 보컬 줄을 보컬 트랙으로 씀)`);
+        } else report.dropped.push(`${ROLE_NAMES[p.role]} 악보의 보컬 줄`);
+        keep = keep.filter((i) => !vocalLike.includes(i));
       }
     }
     // 키보드: 오른손·왼손이 따로 인식되면(높은음자리표 줄 + 낮은음자리표 줄) 오선 두 개짜리 한 트랙으로
@@ -1266,6 +1403,20 @@ export function assembleBand(
     }
   }
   if (!result) throw new Error('합칠 파트가 없습니다.');
+  clearInstrumentAutomations(result);
+  if (promotedVocal) {
+    const vt = promotedVocal.tracks[0];
+    vt.name = ROLE_NAMES.vocal;
+    vt.shortName = ROLE_NAMES.vocal;
+    vt.playbackInfo.program = INSTRUMENTS.find((i) => i.id === 'vocal')!.program;
+    const ready = cloneScore(promotedVocal, settings);
+    report.bars[ROLE_NAMES.vocal] = ready.masterBars.length;
+    result = mergeTracks(result, ready, [0], settings).score;
+    // 보컬은 맨 위에
+    moveTrack(result, result.tracks.length - 1, -(result.tracks.length - 1));
+    clearInstrumentAutomations(result);
+    result = cloneScore(result, settings);
+  }
   assignChannels(result);
   if (tempo) setTempo(result, tempo);
   const unfolded = cloneScore(result, settings);
@@ -1276,8 +1427,44 @@ export function assembleBand(
   return { score: folded.score, unfolded, report };
 }
 
+/** TAB 없는 보컬 줄처럼 보이는지: 이름이 보컬·멜로디·노래이거나 가사가 적혀 있다 */
+function looksVocal(track: Track): boolean {
+  if (/보컬|멜로디|노래|vocal|voice|melody|vox/i.test(`${track.name} ${track.shortName}`)) return true;
+  for (const st of track.staves) for (const b of staffBeats(st)) if (b.lyrics?.some((l) => l && l.trim())) return true;
+  return false;
+}
+
 export function trackKind(track: Track): 'drums' | 'stringed' | 'keys' {
   if (track.isPercussion || track.staves.some((s) => s.isPercussion)) return 'drums';
   if (track.staves.some((s) => s.isStringed)) return 'stringed';
   return 'keys';
+}
+
+/** 가사가 있는 트랙 (밴드 총보의 보컬). 없으면 null */
+export function lyricTrack(score: Score): Track | null {
+  return score.tracks.find((t) => t.staves.some((st) => [...staffBeats(st)].some((b) => b.lyrics?.some((l) => l && l.trim())))) ?? null;
+}
+
+/**
+ * 보컬 트랙의 가사를 다른 트랙(첫 오선 첫 성부)에 같은 박자 자리로 옮겨 적는다 — 보컬을 숨기고 악기 파트만 볼 때도 가사가 보이게.
+ * 화면·인쇄용 사본에만 쓴다(원본 악보는 그대로). 같은 박자 자리에 박자가 없으면 그 앞의 가장 가까운 박자에 이어 붙인다
+ */
+export function borrowLyrics(from: Track, to: Track): number {
+  let n = 0;
+  const src = from.staves[0];
+  const dst = to.staves[0];
+  src.bars.forEach((bar, bi) => {
+    const target = dst.bars[bi]?.voices[0]?.beats.filter((b) => !b.isEmpty && b.graceType === model.GraceType.None);
+    if (!target?.length) return;
+    for (const v of bar.voices)
+      for (const b of v.beats) {
+        const text = b.lyrics?.find((l) => l && l.trim());
+        if (!text) continue;
+        let hit = target[0];
+        for (const t of target) if (t.playbackStart <= b.playbackStart) hit = t;
+        hit.lyrics = [hit.lyrics?.[0] ? hit.lyrics[0] + text : text];
+        n++;
+      }
+  });
+  return n;
 }

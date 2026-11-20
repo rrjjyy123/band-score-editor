@@ -326,11 +326,17 @@ def _add_to_measure(measure, hits, divisions, length, part_id):
     end, existing = _existing_onsets(measure)
     per_whole = 4 * divisions
     notes = []
+    seen = set()
     for t, step, is_open, head, half in sorted(set(hits)):
+        # ◇ 머리는 하프 오픈 하이햇이지만, 덧줄 위(크래시 자리)의 ◇는 겹쳐 그린 심벌 두 개(x + 더 높은 덧줄의 x)를
+        # ◇로 잘못 본 것이다 → 크래시
+        if head == "diamond" and CYMBALS[step][2] == "I49":
+            head = "x"
         name, octave, inst = DIAMOND if head == "diamond" else CYMBALS[step]
         onset = round(t * per_whole)
-        if (onset, name, str(octave)) in existing or onset >= length * per_whole:
+        if (onset, name, str(octave)) in existing or (onset, name, octave) in seen or onset >= length * per_whole:
             continue
+        seen.add((onset, name, octave))
         if is_open and inst == "I42" and head == "x":
             inst = OPEN_HIHAT
         notes.append((onset, name, octave, inst, head, half))
@@ -422,9 +428,15 @@ def _rebuild_overfull(measure, stack, hits, divisions, length):
         t = Fraction(round((x - start) / (right - start) * length / GRID)) * GRID
         return min(max(t, Fraction(0)), length - GRID)
 
+    _place_notes(measure, notes, lambda n: beat(px(n)), place, per_whole, length)
+    return [(h[0], beat(h[0]), *h[2:]) for h in hits]
+
+
+def _place_notes(measure, notes, beat_of, place, per_whole, length):
+    """Audiveris 음들을 beat_of(음)이 정한 박 위치에 다시 놓는다(마디의 음·되감기를 모두 지우고 voice 2 한 줄로)."""
     groups = {}
     for n in notes:
-        groups.setdefault(round(beat(px(n)) * per_whole), {}).setdefault(place(n), n)
+        groups.setdefault(round(beat_of(n) * per_whole), {}).setdefault(place(n), n)
     for el in list(measure):
         if el.tag in ("note", "backup", "forward"):
             measure.remove(el)
@@ -451,7 +463,89 @@ def _rebuild_overfull(measure, stack, hits, divisions, length):
                 _sub(n, "dot")
             measure.append(n)
         pos = onset + dur
-    return [(h[0], beat(h[0]), *h[2:]) for h in hits]
+
+
+def _onsets(measure):
+    """마디 안 음마다 시작 자리(divisions 단위): {id(note): onset}"""
+    pos, last, out = 0, 0, {}
+    for el in measure:
+        if el.tag == "note":
+            if el.find("chord") is not None:
+                out[id(el)] = last
+                continue
+            out[id(el)] = last = pos
+            pos += int(el.findtext("duration") or 0)
+        elif el.tag == "backup":
+            pos -= int(el.findtext("duration") or 0)
+        elif el.tag == "forward":
+            pos += int(el.findtext("duration") or 0)
+    return out
+
+
+def _retime_by_x(measure, stack, hits, divisions, length):
+    """Audiveris가 성부 앞 쉼표를 빼먹어(스네어만 있는 성부가 2박이 아니라 마디 처음에서 시작) 음이 앞으로 밀린 마디를,
+    하이햇·심벌 x(hits, 박 위치를 아는 기준점)로 음 자리(default-x)의 박을 다시 정해 고친다.
+    한 음이라도 지금 박과 x로 본 박이 다르면 마디의 Audiveris 음을 모두 x 박에 다시 놓는다. 고쳤으면 True."""
+    width = float(measure.get("width") or 0)
+    anchors = sorted({(h[0], h[1]) for h in hits})
+    if not width or len(anchors) < 2 or len({t for _, t in anchors}) < 2:
+        return False
+    left, right = stack[0], stack[1]
+    per_whole = 4 * divisions
+    place = lambda n: (n.findtext("unpitched/display-step") or n.findtext("pitch/step"), n.findtext("unpitched/display-octave") or n.findtext("pitch/octave"))
+    notes = [n for n in measure.findall("note") if n.find("rest") is None and n.get("default-x") and n.find("grace") is None
+             and not (place(n)[0] in ("F", "G", "A") and place(n)[1] == "5")]
+    if not notes:
+        return False
+    px = lambda n: left + float(n.get("default-x")) / width * (right - left)
+    pts = anchors + [(right, length)]
+
+    gaps = sorted(q[0] - p[0] for p, q in zip(anchors, anchors[1:]) if q[0] > p[0])
+    snap = 0.2 * gaps[len(gaps) // 2] if gaps else 0
+
+    def beat(x):
+        # 하이햇·심벌과 같은 기둥(x가 가까움)이면 그 박 그대로
+        near = min(anchors, key=lambda a: abs(a[0] - x))
+        if abs(near[0] - x) <= snap:
+            return near[1]
+        # 아니면 앞뒤 기준점 사이 선형 보간(바깥은 가장 가까운 두 점으로 늘림) → 16분음표 격자
+        a, b = pts[0], pts[1]
+        for p, q in zip(pts, pts[1:]):
+            if p[0] <= x:
+                a, b = p, q
+        if b[0] == a[0]:
+            t = a[1]
+        else:
+            t = a[1] + (b[1] - a[1]) * Fraction(x - a[0]) / Fraction(b[0] - a[0])
+        t = Fraction(round(t / GRID)) * GRID
+        return min(max(t, Fraction(0)), length - GRID)
+
+    now = _onsets(measure)
+    # x로 본 박과 16분음표 하나 차이는 x 환산 오차일 수 있다 → 8분음표 이상 어긋난 음이 있을 때만 고친다
+    if all(abs(round(beat(px(n)) * per_whole) - now.get(id(n), -per_whole)) < per_whole / 8 for n in notes):
+        return False
+    # Audiveris 박으로 같은 자리·같은 악기 음이 둘인데 x가 멀면, x와 그 박이 맞지 않는 쪽은 쉼표 등을 음으로 잘못 읽은 것
+    dup = {}
+    for n in notes:
+        dup.setdefault((now.get(id(n)), place(n)), []).append(n)
+    drop = set()
+    for (at, _), ns in dup.items():
+        good = [n for n in ns if round(beat(px(n)) * per_whole) == at]
+        if len(ns) > 1 and good:
+            drop.update(id(n) for n in ns if n not in good)
+    if drop:
+        for n in [n for n in notes if id(n) in drop]:
+            measure.remove(n)
+        notes = [n for n in notes if id(n) not in drop]
+    # 기준점이 고르지 않으면(x로 본 박이 겹치는 음이 있으면) 믿지 않는다
+    seen = {}
+    for n in notes:
+        k = (round(beat(px(n)) * per_whole), place(n))
+        if k in seen and abs(px(seen[k]) - px(n)) > 0.3 * (right - left) / max(1, len(anchors)):
+            return False
+        seen[k] = n
+    _place_notes(measure, notes, lambda n: beat(px(n)), place, per_whole, length)
+    return True
 
 
 def _unpitch_stray_notes(part):
@@ -539,6 +633,8 @@ def add_cymbals(musicxml_path, omr_path, page_paths):
                 length = Fraction(int(attr.findtext("time/beats")), int(attr.findtext("time/beat-type")))
         if finder is find_bold_hits:
             hits = _rebuild_overfull(m, st.stacks[k], hits, divisions, length)
+        elif hits and _retime_by_x(m, st.stacks[k], hits, divisions, length):
+            stats["retimed"] = stats.get("retimed", 0) + 1
         if not hits:
             continue
         hits = _regularize(hits)

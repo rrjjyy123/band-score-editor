@@ -456,6 +456,17 @@ dialog .note {
   cursor: pointer;
 }
 
+/* 인쇄용으로 그리는 동안: A4 폭(인쇄 여백 뺀 약 720px)에 맞춰 그린다 */
+body.printing .score-wrap {
+  width: 720px;
+  max-width: none;
+}
+
+@page {
+  size: A4;
+  margin: 10mm;
+}
+
 @media print {
   .source,
   .topbar,
@@ -465,28 +476,54 @@ dialog .note {
   .status,
   .edit-cursor,
   .bar-warn,
+  .bar-sel,
   .at-cursor-bar,
   .at-cursor-beat {
     display: none !important;
   }
   html,
   body {
-    overflow: visible;
-    height: auto;
-    display: block;
+    overflow: visible !important;
+    height: auto !important;
+    display: block !important;
     background: #fff;
   }
-  .workspace {
-    display: block;
-  }
+  /* 편집 화면은 창 높이에 맞춘 스크롤 칸이라 그대로 인쇄하면 한 화면 분량만 나온다 → 칸을 풀어 악보 전체가 이어지게 */
+  .workspace,
   .viewport {
-    overflow: visible;
+    display: block !important;
+    position: static !important;
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
     background: #fff;
   }
   .score-wrap {
     box-shadow: none;
-    margin: 0;
+    margin: 0 !important;
     max-width: none;
+    width: 720px;
+  }
+  .toast,
+  #toast,
+  dialog {
+    display: none !important;
+  }
+  #score,
+  #score .at-surface {
+    position: static !important;
+    height: auto !important;
+  }
+  /* 조각(대개 한 단)을 위에서부터 차례로 흐르게 하고(순서는 인쇄 직전에 style.order로), 단 중간에서 쪽이 나뉘지 않게 */
+  #score .at-surface {
+    display: flex !important;
+    flex-direction: column;
+  }
+  #score .at-surface > * {
+    position: static !important;
+    flex: none;
+    break-inside: avoid;
+    page-break-inside: avoid;
   }
 }
 
@@ -530,6 +567,12 @@ dialog .note {
 .topbar .dd-list button:hover,
 .popup button:hover {
   background: var(--accent-soft);
+}
+/* 고른 방식 표시 (마디 너비 고르게 / 음표 양에 맞춰) */
+.topbar .dd-list button.checked::after {
+  content: '✓';
+  color: var(--accent);
+  font-weight: 700;
 }
 .dd-list kbd,
 .popup kbd {

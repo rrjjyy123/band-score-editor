@@ -106,6 +106,30 @@ const SLASH_HEADS = new Set([
 ]);
 
 /** MusicXML에서 빗금 머리(<notehead>slash</notehead>)로 들어온 박자를 빗금 박자로 */
+const X_HEADS = new Set([
+  model.MusicFontSymbol.NoteheadXBlack,
+  model.MusicFontSymbol.NoteheadXHalf,
+  model.MusicFontSymbol.NoteheadXWhole,
+  model.MusicFontSymbol.NoteheadXDoubleWhole,
+]);
+
+/** 인식 결과에서 x 머리(<notehead>x</notehead>)로 온 기타·베이스 음을 데드 노트로 (alphaTab은 모양만 바꾼다) */
+export function applyDeadHeads(score: model.Score): number {
+  let n = 0;
+  for (const t of score.tracks)
+    for (const st of t.staves) {
+      if (st.isPercussion) continue;
+      for (const beat of staffBeats(st))
+        for (const note of beat.notes)
+          if (note.style?.noteHead !== undefined && X_HEADS.has(note.style.noteHead)) {
+            note.isDead = true;
+            note.style.noteHead = undefined;
+            n++;
+          }
+    }
+  return n;
+}
+
 export function applySlashHeads(score: model.Score): number {
   let n = 0;
   for (const t of score.tracks)

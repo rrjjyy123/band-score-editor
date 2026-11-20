@@ -18,3 +18,9 @@ web/scratch_t/
 *.mxl
 *.omr.log
 dist-new/
+
+# 보류한 실험 패치 (저장소에 넣지 않음)
+.experiments/
+
+# 개발용 일회성 시험 (임시 폴더 경로가 들어 있음)
+web/test/scratch/

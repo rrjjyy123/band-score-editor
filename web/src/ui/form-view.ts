@@ -44,9 +44,9 @@ export async function formDialog(report: AssembleReport, folded: boolean): Promi
     return left.length ? `${esc(name)}: ${left.length}마디 (${left.slice(0, 24).join(', ')}${left.length > 24 ? '…' : ''})` : '';
   };
   const body = () => `
-    <p>기준 파트는 <b>${esc(form.reference)}</b>입니다. 칸의 숫자는 그 파트를 처음부터 펼쳤을 때의 몇 번째 마디가 그 자리에 왔는지입니다.
+    <p>맨 윗줄이 기준 파트(<b>${esc(form.reference)}</b>)의 마디이고, 아래 줄은 나머지 파트입니다. 칸의 숫자는 그 파트를 처음부터 펼쳤을 때의 몇 번째 마디가 그 자리에 왔는지입니다.
     <span class="legend"><i class="good"></i>잘 맞음 <i class="fair"></i>애매함 <i class="poor"></i>확신 낮음 <i class="none"></i>비움(쉼표)</span></p>
-    <div class="form-grid"><table><thead><tr><th class="name">기준 마디</th>${head}</tr></thead>
+    <div class="form-grid"><table><thead><tr><th class="name" title="기준 파트: 다른 파트들을 이 파트의 마디 자리에 맞춥니다">${esc(form.reference)} (기준)</th>${head}</tr></thead>
     <tbody>${form.parts.map((p) => row(p.name)).join('')}</tbody></table></div>
     <div class="form-tools">
       <span class="hint">${sel ? `${esc(sel.part)} ${sel.bar + 1}번째 자리부터:` : '고칠 칸을 누르세요.'}</span>

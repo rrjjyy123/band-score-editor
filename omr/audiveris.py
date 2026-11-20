@@ -226,6 +226,18 @@ def _exported(out):
     return [p for _, p in sorted(found)]
 
 
+def _failed_sheets(log_path):
+    """Audiveris 로그에서 처리 중 오류로 멈춘 쪽 번호(1부터, 넘긴 책 기준)"""
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return []
+    if "transcription did not complete successfully" not in text:
+        return []
+    return sorted({int(n) for n in re.findall(r"\[book#(\d+)\]\s+Book\s+\d+\s+\|\s+Error processing stub", text)})
+
+
 def _read_mxl(mxl):
     with zipfile.ZipFile(mxl) as z:
         # META-INF/container.xml이 본문 파일을 가리킨다
@@ -363,6 +375,21 @@ def recognize(pdf_path, out_dir, on_progress=None, cancel=None):
                           len(pages), os.path.join(out_dir, stem + ".omr.log"), on_progress, env, cancel)
         result = os.path.join(out_dir, stem + ".musicxml")
         mxls = _exported(out)
+        failed = _failed_sheets(os.path.join(out_dir, stem + ".omr.log")) if not mxls else []
+        if failed and len(failed) < len(pages):
+            # Audiveris가 한 쪽에서 멈추면(내부 오류) 책 전체를 못 내보낸다 — 그 쪽만 빼고 다시 인식한다
+            check_cancel()
+            drop = {n - 1 for n in failed}
+            lost = [k for i, k in enumerate(kept) if i in drop]
+            kept = [k for i, k in enumerate(kept) if i not in drop]
+            pages = [pg for i, pg in enumerate(pages) if i not in drop]
+            shutil.rmtree(out, ignore_errors=True)
+            _make_book(pages, book)
+            code, tail = _run([*cmd, "-batch", "-export", "-constant", limit, *ocr_args, "-output", out, "--", book],
+                              len(pages), os.path.join(out_dir, stem + ".omr.log"), on_progress, env, cancel)
+            mxls = _exported(out)
+            with open(os.path.join(out_dir, stem + ".omr.log"), "a", encoding="utf-8") as log:
+                log.write(f"\n[band-score] Audiveris가 멈춘 쪽을 빼고 다시 인식: 원본 {[skipped + 1 for skipped in lost]}쪽 제외\n")
         if not mxls:
             raise OmrError(f"Audiveris가 MusicXML을 만들지 못했습니다(코드 {code}).\n" + "\n".join(tail[-10:]))
         with open(result, "wb") as f:
@@ -372,6 +399,14 @@ def recognize(pdf_path, out_dir, on_progress=None, cancel=None):
         if os.path.exists(omr):
             if on_progress:
                 on_progress(1 - EXPORT_SHARE / 2, "하이햇·심벌 찾는 중")
+            if os.environ.get("BAND_SCORE_KEEP_RAW"):
+                # 개발용: 드럼 보정만 다시 돌려 볼 수 있게(python -m omr.dev_drums) 보정 전 결과·.omr·페이지 그림을 남긴다
+                keep = os.path.join(out_dir, stem + ".work")
+                os.makedirs(keep, exist_ok=True)
+                shutil.copyfile(result, os.path.join(keep, "predrum.xml"))
+                shutil.copyfile(omr, os.path.join(keep, "book.omr"))
+                for i, pg in enumerate(pages):
+                    shutil.copyfile(pg.path, os.path.join(keep, f"page_{i + 1:02d}.png"))
             try:
                 stats = drums.add_cymbals(result, omr, [p.path for p in pages])
             except Exception as e:  # 드럼 보정이 실패해도 Audiveris 결과는 그대로 쓴다
@@ -384,6 +419,13 @@ def recognize(pdf_path, out_dir, on_progress=None, cancel=None):
             shutil.copyfile(result, os.path.join(out_dir, stem + ".raw.xml"))
             with open(os.path.join(out_dir, stem + ".raw.json"), "w", encoding="utf-8") as f:
                 json.dump({"kept": kept, "pdf": os.path.abspath(pdf_path)}, f, ensure_ascii=False)
+        # 오선이 생략된 단에서 보컬이 기타 파트로 들어간 것 되돌리기 (TAB 짝짓기 전에)
+        try:
+            hidden = fix_hidden_staff_parts(result)
+        except Exception as e:
+            hidden = repr(e)
+        with open(os.path.join(out_dir, stem + ".omr.log"), "a", encoding="utf-8") as log:
+            log.write(f"\n[band-score] 숨은 오선 단의 파트 바로잡음: {hidden}\n")
         if tabs:
             try:
                 info = tab.add_to_result(tabs, result, {orig: i for i, orig in enumerate(kept)})
@@ -398,6 +440,20 @@ def recognize(pdf_path, out_dir, on_progress=None, cancel=None):
             info = {"error": repr(e)}
         with open(os.path.join(out_dir, stem + ".omr.log"), "a", encoding="utf-8") as log:
             log.write(f"\n[band-score] 도돌이: {info}\n")
+        # 없는 쉼표·꼬리 못 읽은 음 때문에 넘친 마디를 음 간격으로 고친다(편집기가 셋잇단으로 '맞추기' 전에)
+        try:
+            spaced = fix_spacing_overflow(result)
+        except Exception as e:
+            spaced = repr(e)
+        with open(os.path.join(out_dir, stem + ".omr.log"), "a", encoding="utf-8") as log:
+            log.write(f"\n[band-score] 음 간격으로 넘친 마디 고침: {spaced}\n")
+        # 쉼표를 못 읽어 짧아진 마디를 Audiveris는 못갖춘마디(implicit)로 적는다. 다시 채워 꽉 찼으면 보통 마디로
+        try:
+            full = fix_full_implicit(result)
+        except Exception as e:
+            full = repr(e)
+        with open(os.path.join(out_dir, stem + ".omr.log"), "a", encoding="utf-8") as log:
+            log.write(f"\n[band-score] 못갖춘마디 표시 지움: {full}\n")
         # 되감기(backup) 뒤에 이미 채운 성부 번호를 다시 쓴 음은 alphaTab이 버린다: 새 성부 번호로
         try:
             shifted = fix_stream_offsets(result)
@@ -736,6 +792,243 @@ def fix_stream_offsets(musicxml_path):
                     ET.SubElement(el, "duration").text = str(st["start"] - pos)
                     m.insert(idx, el)
                 pos = st["start"] + st["len"]
+            fixed += 1
+    if fixed:
+        head = raw[:raw.find(b"<score-partwise")]
+        with open(musicxml_path, "wb") as f:
+            f.write(head + ET.tostring(root, encoding="utf-8"))
+    return fixed
+
+
+def fix_hidden_staff_parts(musicxml_path):
+    """단에서 한 파트의 오선이 생략되면(그 단에서 기타가 쉬어 오선을 안 그림) Audiveris는 남은 오선을 아래 파트에 넣고
+    위 파트를 숨긴(print-object="no") 쉼표 마디로 채운다. 남은 오선에 가사가 있고 숨은 쪽이 원래 가사가 붙는 파트(보컬)면
+    둘을 바꾼다. 바꾼 마디 수를 돌려준다."""
+    import xml.etree.ElementTree as ET
+    with open(musicxml_path, "rb") as f:
+        raw = f.read()
+    root = ET.fromstring(raw)
+    parts = root.findall("part")
+    if len(parts) < 2:
+        return 0
+    meas = [p.findall("measure") for p in parts]
+    n = min(len(ms) for ms in meas)
+    lyr = [sum(1 for m in ms for _ in m.iter("lyric")) for ms in meas]
+    if not max(lyr):
+        return 0
+    vocal = lyr.index(max(lyr))
+
+    def hidden(m):
+        sd = m.find("attributes/staff-details")
+        return sd is not None and sd.get("print-object") == "no"
+
+    # 단(새 단·새 쪽 표시부터 다음 표시 전까지)마다
+    starts = [i for i in range(n) if i == 0 or any(
+        (pr := meas[k][i].find("print")) is not None and (pr.get("new-system") == "yes" or pr.get("new-page") == "yes")
+        for k in range(len(parts)))] + [n]
+    swapped = 0
+    for a, b in zip(starts, starts[1:]):
+        if not hidden(meas[vocal][a]):
+            continue
+        for o in range(len(parts)):
+            if o == vocal or hidden(meas[o][a]) or not any(meas[o][i].find(".//lyric") is not None for i in range(a, b)):
+                continue
+            for i in range(a, b):
+                mv, mo = meas[vocal][i], meas[o][i]
+                kv = [c for c in mv if c.tag not in ("print", "attributes")]
+                ko = [c for c in mo if c.tag not in ("print", "attributes")]
+                for c in kv:
+                    mv.remove(c)
+                for c in ko:
+                    mo.remove(c)
+                mv.extend(ko)
+                mo.extend(kv)
+                for x, y in ((mv, mo),):
+                    wx, wy = x.get("width"), y.get("width")
+                    for el, w in ((x, wy), (y, wx)):
+                        if w is None:
+                            el.attrib.pop("width", None)
+                        else:
+                            el.set("width", w)
+                sv, so = mv.find("attributes/staff-details"), mo.find("attributes/staff-details")
+                if sv is not None:
+                    sv.set("print-object", "yes")
+                if so is not None:
+                    so.set("print-object", "no")
+                swapped += 1
+            break
+    if swapped:
+        head = raw[:raw.find(b"<score-partwise")]
+        with open(musicxml_path, "wb") as f:
+            f.write(head + ET.tostring(root, encoding="utf-8"))
+    return swapped
+
+
+def fix_spacing_overflow(musicxml_path):
+    """박자가 넘치는 성부를 음 사이 간격(default-x)으로 고친다. 넘친 길이를 E라 하면
+    (가) 길이가 E인 쉼표가 앞 음이나 뒤 음에 너무 붙어 있으면(그 길이만큼의 간격의 절반도 안 됨) 없는 쉼표를 읽은 것 → 지운다
+       
+    (나) 길이가 2E인 음인데 다음 음까지 간격이 E 길이만큼뿐이면 꼬리·빔을 못 읽은 것 → 길이를 반으로 (보컬 73마디)
+    후보가 꼭 하나일 때만 고친다. 그대로 두면 편집기가 넘친 마디에서 같은 길이 음 3개를 셋잇단으로 '맞춰' 버린다.
+    고친 성부 수를 돌려준다."""
+    import statistics
+    import xml.etree.ElementTree as ET
+    with open(musicxml_path, "rb") as f:
+        raw = f.read()
+    root = ET.fromstring(raw)
+    half = {"whole": "half", "half": "quarter", "quarter": "eighth", "eighth": "16th", "16th": "32nd"}
+    fixed = 0
+    for part in root.findall("part"):
+        if any(s.text == "percussion" for s in part.iter("sign")):
+            continue            # 드럼은 박마다 다시 나눠 적으므로 건너뜀
+        div, beats, beat_type = 1, 4, 4
+        for m in part.findall("measure"):
+            if m.find("attributes/divisions") is not None:
+                div = int(m.findtext("attributes/divisions"))
+            if m.find("attributes/time/beats") is not None:
+                beats, beat_type = int(m.findtext("attributes/time/beats")), int(m.findtext("attributes/time/beat-type"))
+            length = div * 4 * beats // beat_type
+            voices = {}
+            for n in m.findall("note"):
+                if n.find("chord") is not None or n.find("grace") is not None:
+                    continue
+                voices.setdefault((n.findtext("staff") or "1", n.findtext("voice") or "1"), []).append(n)
+            # 쉼표만 있는 군더더기 성부(보컬 5마디: 온쉼표 옆 성부 2의 8분쉼표, 89마디: 끝에 성부 2 8분쉼표):
+            # 다른 성부 하나가 마디를 채우면(마디 쉼표 포함) 그 성부만 남긴다
+            def is_full(ns):
+                return any(n.find("rest") is not None and n.find("rest").get("measure") == "yes" for n in ns) \
+                    or sum(int(n.findtext("duration") or 0) for n in ns) == length
+            # 오선이 둘 이상인 파트(피아노 큰보표)는 건너뛴다: 왼손 오선의 쉼표 성부까지 지워 왼손 마디가 통째로 비었다
+            multi_staff = len({k[0] for k in voices}) > 1
+            rest_only = [] if multi_staff else [k for k, ns in voices.items() if all(n.find("rest") is not None for n in ns)]
+            keep = [k for k in voices if k not in rest_only]
+            if not keep and len(voices) > 1:
+                keep = [k for k, ns in voices.items() if is_full(ns)][:1]
+                rest_only = [k for k in voices if k not in keep]
+            if rest_only and len(keep) == 1 and is_full(voices[keep[0]]):
+                staff, voice = keep[0]
+                for el in list(m):
+                    if el.tag == "backup" or el.tag == "forward" and (el.findtext("voice") or "1") != voice:
+                        m.remove(el)
+                    elif el.tag == "note" and ((el.findtext("staff") or "1"), (el.findtext("voice") or "1")) != keep[0]:
+                        m.remove(el)
+                for n in voices[keep[0]]:
+                    r = n.find("rest")
+                    if r is not None and r.get("measure") == "yes" and n.find("duration") is not None:
+                        n.find("duration").text = str(length)
+                voices = {keep[0]: voices[keep[0]]}
+                fixed += 1
+            for key, ns in voices.items():
+                durs = [int(n.findtext("duration") or 0) for n in ns]
+                excess = sum(durs) - length
+                bar_rest = [n for n in ns if n.find("rest") is not None and n.find("rest").get("measure") == "yes"]
+                if len(ns) > 1 and len(bar_rest) == 1 and all(n.find("rest") is not None for n in ns):
+                    # 마디 쉼표 옆에 덧붙은 쉼표(보컬 5마디: 온쉼표 + 8분쉼표) → 마디 쉼표만 남긴다
+                    for n in ns:
+                        if n is not bar_rest[0]:
+                            m.remove(n)
+                    if bar_rest[0].find("duration") is not None:
+                        bar_rest[0].find("duration").text = str(length)
+                    for el in m:
+                        if el.tag == "backup" and int(el.findtext("duration") or 0) == sum(durs):
+                            el.find("duration").text = str(length)
+                            break
+                    fixed += 1
+                    continue
+                if excess <= 0 or any(n.get("default-x") is None for n in ns) \
+                        or any(n.find("time-modification") is not None for n in ns):
+                    continue
+                xs = [float(n.get("default-x")) for n in ns]
+                # 길이 한 단위(div)당 간격 — 음표 사이 간격/길이의 중앙값
+                per = [(xs[i + 1] - xs[i]) / durs[i] for i in range(len(ns) - 1) if durs[i] > 0 and xs[i + 1] > xs[i]]
+                if len(per) < 3:
+                    continue
+                unit = statistics.median(per)
+                fake_rests = [i for i in range(1, len(ns)) if ns[i].find("rest") is not None and durs[i] == excess
+                              and (xs[i] - xs[i - 1] < 0.6 * durs[i - 1] * unit
+                                   or i + 1 < len(ns) and xs[i + 1] - xs[i] < 0.6 * durs[i] * unit)]
+                short = [i for i in range(len(ns) - 1) if ns[i].find("rest") is None and durs[i] == 2 * excess
+                         and not ns[i].findall("dot") and ns[i].findtext("type") in half
+                         and xs[i + 1] - xs[i] < 1.4 * excess * unit]
+                if len(fake_rests) == 1:
+                    victim = ns[fake_rests[0]]
+                    m.remove(victim)
+                elif not fake_rests and len(short) == 1:
+                    n0 = ns[short[0]]
+                    # 화음의 나머지 음도 같이
+                    kids = list(m)
+                    j = kids.index(n0)
+                    group = [n0]
+                    for k in kids[j + 1:]:
+                        if k.tag != "note" or k.find("chord") is None:
+                            break
+                        group.append(k)
+                    for g in group:
+                        if g.find("duration") is not None:
+                            g.find("duration").text = str(int(g.findtext("duration")) // 2)
+                        if g.find("type") is not None:
+                            g.find("type").text = half[g.findtext("type")]
+                else:
+                    continue
+                # 이 성부 뒤의 되감기(이 성부 전체 길이만큼)도 줄인다
+                total = sum(durs)
+                seen = False
+                for el in m:
+                    if el is ns[-1] or el in ns:
+                        seen = True
+                    elif seen and el.tag == "backup":
+                        if int(el.findtext("duration") or 0) == total:
+                            el.find("duration").text = str(total - excess)
+                        break
+                fixed += 1
+    if fixed:
+        head = raw[:raw.find(b"<score-partwise")]
+        with open(musicxml_path, "wb") as f:
+            f.write(head + ET.tostring(root, encoding="utf-8"))
+    return fixed
+
+
+def fix_full_implicit(musicxml_path):
+    """못갖춘마디 표시(implicit="yes")가 있는데 음·쉼표가 박자표 길이만큼 꽉 찬 마디는 표시를 지운다.
+    Audiveris는 8분쉼표 등을 못 읽어 짧아진 첫 마디를 못갖춘마디로 적는데, TAB 보정이 빠진 쉼표를 채우면
+    꽉 찬 보통 마디가 된다. 표시를 두면 편집기가 그 마디를 못갖춘마디로 보고 박자가 모자라도 알리지 않는다.
+    지운 마디 수를 돌려준다."""
+    import xml.etree.ElementTree as ET
+    with open(musicxml_path, "rb") as f:
+        raw = f.read()
+    root = ET.fromstring(raw)
+    parts = root.findall("part")
+    if not parts:
+        return 0
+    n_meas = len(parts[0].findall("measure"))
+    fixed = 0
+    for i in range(n_meas):
+        ms = [p.findall("measure")[i] for p in parts if len(p.findall("measure")) > i]
+        if not any(m.get("implicit") == "yes" for m in ms):
+            continue
+        full = True
+        for p in parts:
+            div, beats, beat_type = 1, 4, 4
+            for m in p.findall("measure")[:i + 1]:
+                if m.find("attributes/divisions") is not None:
+                    div = int(m.findtext("attributes/divisions"))
+                if m.find("attributes/time/beats") is not None:
+                    beats, beat_type = int(m.findtext("attributes/time/beats")), int(m.findtext("attributes/time/beat-type"))
+            m = p.findall("measure")[i]
+            length = div * 4 * beats / beat_type
+            tot = {}
+            for n in m.findall("note"):
+                if n.find("chord") is not None or n.find("grace") is not None:
+                    continue
+                k = (n.findtext("staff") or "1", n.findtext("voice") or "1")
+                tot[k] = tot.get(k, 0) + int(n.findtext("duration") or 0)
+            # 성부마다 가장 긴 것이 마디 길이와 같아야 꽉 찬 마디
+            if not tot or max(tot.values()) != length:
+                full = False
+                break
+        if full:
+            for m in ms:
+                m.attrib.pop("implicit", None)
             fixed += 1
     if fixed:
         head = raw[:raw.find(b"<score-partwise")]

@@ -372,6 +372,36 @@ def test_fix_stream_offsets():
         assert {n.findtext("voice") for n in m.findall("note") if n.findtext("staff") == "2"} == {"5"}
 
 
+def test_tab_rhythm_mid_rests():
+    """TAB 박 사이 간격이 두 배로 벌어진 자리는 Audiveris가 놓친 8분쉼표로 채운다(맨 끝으로 밀지 않는다).
+    원본: 8분 8분 쉼 8분 | 8분 8분 쉼 8분 → Audiveris는 8분 6개만 읽음."""
+    from .tabrhythm import solve
+    xs = [0, 10, 30, 40, 50, 70]
+    events = [{"x": x, "aud": 6, "rest": False} for x in xs]
+    mid = []
+    durs, lead, tail, _ = solve(events, 48, mid)
+    assert durs == [6] * 6 and lead == 0 and tail == 0, (durs, lead, tail)
+    assert mid == [0, 0, 6, 0, 0, 6], mid         # 3번째·6번째 박 앞에 8분쉼표
+
+
+def test_fix_full_implicit():
+    """쉼표를 채워 꽉 찬 못갖춘마디는 보통 마디로, 정말 짧은 못갖춘마디는 그대로."""
+    import tempfile
+    import xml.etree.ElementTree as ET
+    from .audiveris import fix_full_implicit
+    e8 = '<note><pitch><step>A</step><octave>2</octave></pitch><duration>2</duration><voice>1</voice><type>eighth</type></note>'
+    xml = ('<?xml version="1.0"?><score-partwise><part id="P1">'
+           '<measure number="0" implicit="yes"><attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>'
+           + e8 * 8 + '</measure><measure number="1" implicit="yes">' + e8 * 2 + '</measure></part></score-partwise>')
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "x.musicxml")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(xml)
+        assert fix_full_implicit(p) == 1
+        ms = ET.parse(p).getroot().findall(".//measure")
+        assert ms[0].get("implicit") is None and ms[1].get("implicit") == "yes"
+
+
 def main(argv):
     tests =[(k, v) for k, v in globals().items() if k.startswith("test_") and callable(v)]
     failed = 0

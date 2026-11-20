@@ -7,6 +7,7 @@ Finale 악보는 PDF 안에 음표머리·쉼표·꼬리·음자리표가 Maestr
 좌표는 PDF 포인트(1/72인치), y는 아래로 갈수록 크다.
 """
 
+import os
 import math
 import re
 import xml.etree.ElementTree as ET
@@ -316,6 +317,7 @@ class Note:
     tie_start: bool = False
     tie_stop: bool = False
     midi: int = None
+    open: bool = False  # 드럼: 머리 위 'o' 표시(열린 하이햇)
 
 
 @dataclass
@@ -402,8 +404,12 @@ class PageReader:
             if id(g) in placed:
                 self.by_staff[id(placed[id(g)])].append(g)
         self.bars = {id(s): barline_xs(pg, s) for s in st}
-        barx = {round(x, 1) for xs in self.bars.values() for x in xs}
-        self.stems = [v for v in pg.vlines if v[3] < 1.3 and v[2] - v[1] > 3 and round(v[0], 1) not in barx]
+        # 세로줄 중 마디줄은 뺀다 — 같은 x라도 다른 단(오선)의 마디줄이면 기둥일 수 있다
+        barx = [(round(x, 1), s.top, s.bottom) for s in st for x in self.bars[id(s)]]
+
+        def on_barline(v):
+            return any(round(v[0], 1) == x and v[1] < bot + 1 and v[2] > top - 1 for x, top, bot in barx)
+        self.stems = [v for v in pg.vlines if v[3] < 1.3 and v[2] - v[1] > 3 and not on_barline(v)]
         self.beams = [f for f in pg.fills if f[3] - f[1] < 12 and f[2] - f[0] > 1.5]
 
     # -------------------------------------------------- 오선 머리(음자리표·조표·박자표)
@@ -588,6 +594,9 @@ def _stem_for(h, stems, sp):
             continue
         up = (h.y - y0) > (y1 - h.y)
         d = min(abs(x - (h.x + h.w)), abs(x - h.x))
+        # 머리가 촘촘하면 한 기둥이 옆 머리의 반대쪽 끝에도 닿는다 — 제자리(위 기둥은 오른쪽, 아래는 왼쪽)를 먼저
+        if not ((up and right) or (not up and left)):
+            d += 0.5
         if best is None or d < best[0]:
             best = (d, v, up)
     return (best[1], best[2]) if best else (None, None)
@@ -642,8 +651,18 @@ def _measure_events(reader, s, mg, heads, sp, norm, length, clef, key, texts, mx
 
     # 점: 머리 오른쪽, 같은 높이(줄 위 음은 반 칸 위). 점마다 왼쪽에서 가장 가까운 음 하나에만
     dots_of = {}
+    # 끝 도돌이표의 점: 굵은 세로줄 바로 왼쪽, 오선 가운데 두 칸(가운데 줄 ± 반 칸)에 하나씩. 마디 끝 음의 부점으로 읽지 않게
+    thick = [v for v in reader.pg.vlines if v[3] > 1.2 and v[1] <= s.top + 1 and v[2] >= s.bottom - 1]
+    mid = (s.top + s.bottom) / 2
+
+    def in_repeat_space(y):
+        return abs(abs(y - mid) - 0.5 * sp) < 0.3 * sp
+
+    def repeat_dot(g):
+        return in_repeat_space(g.y) and any(0 < v[0] - g.x < 2.5 * sp for v in thick) and any(
+            o is not g and o.ch in DOTS and abs(o.x - g.x) < 0.5 and in_repeat_space(o.y) and abs(o.y - g.y) > 0.5 * sp for o in mg)
     for g in mg:
-        if g.ch not in DOTS:
+        if g.ch not in DOTS or repeat_dot(g):
             continue
         best = None
         for e in events:
@@ -668,6 +687,18 @@ def _measure_events(reader, s, mg, heads, sp, norm, length, clef, key, texts, mx
             e.dots = min(len(dots), 2)
             e.rest_y = g.y
             events.append(e)
+    # 드럼 열린 하이햇: x 머리 바로 위의 작은 'o' (닫힘 '+'는 기본값이라 따로 표시하지 않음)
+    for g in mg:
+        if g.ch != "o":
+            continue
+        gx = g.x + g.w / 2
+        cand = [n for e in events for n in e.notes
+                if n.ch in HEAD_X and abs(n.x + n.w / 2 - gx) < 0.8 * sp and 0 < n.y - g.y < 7 * sp]
+        if cand:
+            min(cand, key=lambda n: n.y - g.y).open = True
+    # 음이 있는 마디의 온쉼표는 다른 성부(드럼 베이스 쉼 등)가 비었다는 표시일 뿐 — 마디를 통째로 쉬게 하지 않는다
+    if any(e.notes for e in events):
+        events = [e for e in events if not e.full]
     events.sort(key=lambda e: e.x)
     # 4) 임시표·음높이
     alters = {}
@@ -909,8 +940,13 @@ def _tab_events(reader, t, digits, mx0, mx1, length, texts, glyphs):
         # 부점: 숫자 바로 오른쪽, TAB 줄 사이(위아래의 점은 스타카토·뮤트 표시)
         if e.notes:
             right = max(n.x + n.w for n in e.notes)
-            dots = {round(g.x, 1) for g in glyphs if g.ch in DOTS and right < g.x < right + 1.5 * sp
-                    and t.top + 0.2 * sp < g.y < t.bottom + 0.2 * sp}
+            cand = [g for g in glyphs if g.ch in DOTS and right < g.x < right + 1.5 * sp
+                    and t.top + 0.2 * sp < g.y < t.bottom + 0.2 * sp]
+            # 끝 도돌이표의 점(같은 x에 위아래로 둘)을 부점으로 읽어 마디 끝 음이 점음표가 되던 것
+            rep = {round(g.x, 1) for g in glyphs if g.ch in DOTS and t.top - 0.5 * sp < g.y < t.bottom + 0.5 * sp
+                   and sum(1 for o in glyphs if o.ch in DOTS and abs(o.x - g.x) < 0.5 and 2.0 < abs(o.y - g.y) < 3.5 * sp
+                           and t.top - 0.5 * sp < o.y < t.bottom + 0.5 * sp) >= 1}
+            dots = {round(g.x, 1) for g in cand if round(g.x, 1) not in rep}
             e.dots = min(len(dots), 2)
     for g in glyphs:
         if g.ch in RESTS and mx0 < g.x < mx1 and RESTS[g.ch]:
@@ -927,6 +963,7 @@ def _tab_events(reader, t, digits, mx0, mx1, length, texts, glyphs):
         d *= 1.5 if e.dots == 1 else 1.75 if e.dots == 2 else 1
         e.dur = int(round(d))
     _apply_tuplets(events, texts, t, sp, mx0, mx1, reader)
+    _stretch_plain_stems(events, mx1, length)
     if stemless:
         # 기둥 없는 TAB(리듬 표시 없음): 남은 길이를 x 간격대로 나눈다
         known = sum(e.dur for e in events if not e.grace and e.dur)
@@ -938,6 +975,26 @@ def _tab_events(reader, t, digits, mx0, mx1, length, texts, glyphs):
 
 
 LEGAL = [96, 72, 48, 36, 24, 18, 12, 9, 6, 3]
+
+
+def _stretch_plain_stems(events, mx1, length):
+    """TAB 리듬에서 꼬리·빔 없는 기둥은 4분음표로 읽지만, Finale TAB은 2분·온음표도 같은 기둥 하나로 그린다
+    (예: 너라는 별 기타 5마디 = 2분 화음 두 개). 그래서 '4분 + 4분'으로 읽혀 마디가 모자라고 끝에 쉼표가 채워졌다.
+    마디에 쉼표가 하나도 그려져 있지 않은데 길이가 모자라면, 꼬리 없는 기둥 음들의 길이를 다음 음까지의 간격대로 늘린다."""
+    if os.environ.get("BAND_SCORE_NO_STRETCH"):
+        return
+    # 쉼표가 그려진 마디, 기둥 없는 음(길이를 따로 나눔)이 있는 마디는 건드리지 않는다
+    if any(e.rest for e in events) or any(not e.grace and not e.dur for e in events):
+        return
+    known = sum(e.dur for e in events if not e.grace and e.dur)
+    deficit = length - known
+    plain = [e for e in events if not e.grace and not e.rest and e.stem is not None and not e.nbeam and not e.dots and e.dur == 24]
+    if deficit <= 0 or not plain:
+        return
+    total = sum(e.dur for e in plain) + deficit
+    for e in plain:
+        e.dur = 0
+    _spread(events, mx1, total)
 
 
 def _spread(events, mx1, total):
@@ -1214,7 +1271,14 @@ def system_marks(pg, units, spans, carry=None):
     marks = {}
 
     def put(i, k, v):
+        # 한 마디 끝에서 끝나는 괄호는 하나뿐이다: 이미 정해진 끝(이 단에서 읽은 괄호)을 앞 단에서 이어진 괄호가 덮지 않게
+        if k == "ending_stop" and k in marks.get(i, {}):
+            return
         marks.setdefault(i, {})[k] = v
+    # 괄호 줄 후보: 오선·TAB 줄은 뺀다 (괄호를 찾는 범위가 위 단의 TAB 맨 아랫줄까지 닿아, 그 줄을
+    # '앞 단에서 이어진 괄호'로 읽어 1번 괄호가 끝없이 이어졌다 — 시험 악보 베이스)
+    staff_ys = [y for st in pg.staves for y in st.lines]
+    bracket_lines = [h for h in pg.hlines if not any(abs(h[2] - y) < 0.6 for y in staff_ys)]
     # 도돌이표: 굵은 세로줄 + 2·3칸 높이의 점 둘(점이 오른쪽이면 시작, 왼쪽이면 끝)
     thick = [v for v in pg.vlines if v[3] > 1.2 and v[1] <= ref.top + 1 and v[2] >= ref.bottom - 1]
     dots = [g for g in pg.glyphs if g.ch in DOTS and ref.top + sp < g.y < ref.bottom - sp]
@@ -1226,14 +1290,16 @@ def system_marks(pg, units, spans, carry=None):
         if len(right) >= 2:
             put(min(range(len(spans)), key=lambda i: abs(spans[i][0] - x)), "repeat_start", True)
     # 1·2번 괄호: 맨 위 오선 위 '1.' 글자 + 그 왼쪽 위에서 시작하는 가로줄(끝에 갈고리가 있으면 닫힘)
+    numbered = []
     for t in pg.texts:
         m = re.match(r"^\s*(\d)[.,]?(?:\s*,\s*(\d)[.,]?)?\s*$", t.text)
         if not m or not (ref.top - 9 * sp < t.y1 < ref.top) or t.size > 14:
             continue
-        line = [h for h in pg.hlines if abs(h[0] - t.x0) < 12 and -6 < t.y0 - h[2] < 6 and h[1] - h[0] > 3 * sp]
+        line = [h for h in bracket_lines if abs(h[0] - t.x0) < 12 and -6 < t.y0 - h[2] < 6 and h[1] - h[0] > 3 * sp]
         if not line:
             continue
         h = max(line, key=lambda h: h[1] - h[0])
+        numbered.append(h)
         nums = ",".join(g for g in m.groups() if g)
         idx = [i for i, (a, b) in enumerate(spans) if b > h[0] + sp and a < h[1] - sp]
         if not idx:
@@ -1246,8 +1312,9 @@ def system_marks(pg, units, spans, carry=None):
             put(idx[-1], "ending_stop", (nums, "stop" if hook else "discontinue"))
     if carry:
         # 앞 단에서 이어진 괄호: 단 첫머리에서 시작하는 번호 없는 가로줄
-        cont = [h for h in pg.hlines if ref.top - 9 * sp < h[2] < ref.top and h[1] - h[0] > 3 * sp
-                and abs(h[0] - spans[0][0]) < 3 * sp]
+        # 번호 없는 가로줄. Finale는 단 첫머리부터가 아니라 마지막 마디 위에만(끝 갈고리와 함께) 그리기도 한다
+        cont = [h for h in bracket_lines if ref.top - 9 * sp < h[2] < ref.top and h[1] - h[0] > 3 * sp
+                and h not in numbered and h[0] < spans[-1][1] - sp]
         if cont:
             h = max(cont, key=lambda h: h[1] - h[0])
             idx = [i for i, (a, b) in enumerate(spans) if b > h[0] + sp and a < h[1] - sp] or [0]
@@ -1565,7 +1632,7 @@ def _note_el(mel, dur, midi=None, chord=False, rest=False, grace=False, voice=1,
         ET.SubElement(tm, "actual-notes").text = "3"
         ET.SubElement(tm, "normal-notes").text = "2"
     if dead:
-        ET.SubElement(n, "notehead").text = "x"
+        ET.SubElement(n, "notehead").text = dead if isinstance(dead, str) else "x"
     nots = None
     if tie_start or tie_stop or string:
         nots = ET.SubElement(n, "notations")
@@ -1622,7 +1689,8 @@ def _event_notes(e, ins, capo, key):
             continue
         # 드럼은 음높이 대신 오선 자리(맨 아랫줄 E4 기준)
         pitch = ("U", 30 + n.pos) if perc else n.midi
-        out.append((pitch, None, None, n.tie_start, n.tie_stop, n.ch in HEAD_X or n.ch in MUTE_SLASH))
+        head = "circle-x" if perc and n.open else (n.ch in HEAD_X or n.ch in MUTE_SLASH)
+        out.append((pitch, None, None, n.tie_start, n.tie_stop, head))
     return out
 
 
@@ -1666,7 +1734,7 @@ def _write_measure(mel, m, ins, capo, key, length, n_strings):
                 notes = [(mi, s, f, ts, True, dd) for mi, s, f, ts, _, dd in prev_notes]
             if slash and prev_notes:
                 # 빗금 = 앞 화음을 다시 친다. x 빗금은 같은 줄을 뮤트로
-                notes = [(mi, s, (-1 if muted else f), False, False, dd or muted) for mi, s, f, _, _, dd in prev_notes]
+                notes = [(mi, s, f, False, False, dd or muted) for mi, s, f, _, _, dd in prev_notes]
             if not notes:
                 if e.grace:
                     continue
@@ -1688,8 +1756,8 @@ def _write_measure(mel, m, ins, capo, key, length, n_strings):
                     _note_el(mel, p, midi, chord=k > 0, voice=v, typ=t2, dots=d2, tuplet=e.tuplet if typ else 0,
                              tie_start=(ts if pi == len(pieces) - 1 else True), tie_stop=(tp if pi == 0 else True),
                              string=s, fret=f, lyrics=e.lyrics if (k == 0 and pi == 0) else None, key=key, dead=dead)
-            if notes:
-                prev_notes = notes
+            if notes and not slash:
+                prev_notes = notes      # 빗금은 마지막으로 실제로 적힌 화음을 되풀이한다 (뮤트 빗금 뒤에도)
             used += d
         if used < length:
             for p in _split(length - used):
