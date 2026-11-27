@@ -24,3 +24,10 @@ dist-new/
 
 # 개발용 일회성 시험 (임시 폴더 경로가 들어 있음)
 web/test/scratch/
+
+# exe 빌드용 가상환경 (build_exe.bat이 만듦)
+.venv-build/
+
+# exe 빌드용 가상환경 (build_exe.bat이 만듦)
+.venv-build/
+dist-mcp/

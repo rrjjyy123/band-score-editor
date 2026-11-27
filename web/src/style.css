@@ -29,7 +29,8 @@ body {
 
 body {
   display: grid;
-  grid-template-rows: auto auto 1fr auto auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
 }
 
 button,
@@ -114,16 +115,148 @@ button:disabled {
   padding: 3px 8px;
   font-size: 13px;
 }
-.palette .label {
-  color: var(--muted);
-  font-size: 12px;
-  margin-right: 2px;
+.palette .tool-primary {
+  border-right: 1px solid var(--line);
+  padding-right: 9px;
+  margin-right: 5px;
 }
+.tool-arrow { font-size: 10px; opacity: 0.75; }
+@font-face {
+  font-family: 'Band Score Music';
+  src: url('/font/Bravura.woff2') format('woff2');
+}
+.music-glyph, .entry-glyph { font-family: 'Band Score Music', serif; }
+.palette button[data-label] { display: inline-flex; align-items: center; gap: 4px; min-height: 29px; }
+.tool-icon { display: inline-grid; place-items: center; min-width: 16px; line-height: 1; font-size: 16px; }
+.tool-icon.music-glyph, .tool-menu .music-glyph { font-size: 21px; line-height: 0.85; }
+#paletteTooltip:not([hidden]) {
+  position: fixed;
+  z-index: 35;
+  padding: 5px 8px;
+  color: var(--panel);
+  background: var(--ink);
+  font-size: 12px;
+  border-radius: 5px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+@media (max-width: 760px) {
+  .palette .tool-name, .palette .tool-hint { display: none; }
+  .palette button[data-label] { justify-content: center; min-width: 36px; min-height: 36px; padding: 4px; }
+  .palette { gap: 5px; padding-inline: 7px; }
+}
+.tool-hint { margin-left: auto; color: var(--muted); font-size: 12px; }
+.tool-menu:not([hidden]) {
+  position: fixed;
+  z-index: 30;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  max-width: calc(100vw - 16px);
+  max-height: 60vh;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 5px 16px #0002;
+}
+.tool-menu button { min-height: 29px; white-space: normal; }
+.score-wrap[data-score-tool="note"], .score-wrap[data-score-tool="rest"] { cursor: crosshair; }
+.score-wrap[data-score-tool="erase"] { cursor: cell; }
+.entry-guide {
+  position: absolute;
+  width: 11px;
+  height: 7px;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  transform: translate(-50%, -50%) rotate(-18deg);
+  pointer-events: none;
+  z-index: 7;
+}
+.entry-guide.drum-guide {
+  width: auto;
+  height: auto;
+  border: 0;
+  transform: none;
+  color: var(--accent);
+}
+.entry-glyph { position: absolute; inset: 0 auto auto 0; font-size: 27px; line-height: 0; transform: translateX(-50%); }
+.entry-label {
+  display: none;
+  position: absolute;
+  left: 12px;
+  top: -26px;
+  white-space: nowrap;
+  padding: 4px 7px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  color: var(--ink);
+  background: var(--panel);
+  font-size: 12px;
+}
+.drum-guide .entry-label { display: block; }
+.drum-guide.guide-left .entry-label { right: 12px; left: auto; }
+@media print { .entry-guide, .ink-options, #paletteTooltip { display: none !important; } }
 
 .workspace {
+  /* 파트 창 너비: 경계를 끌어서 바꾸고, 접으면 0 (app.ts의 setupTracksSplit) */
+  --tracks-w: 290px;
+  --tracks-column: var(--tracks-w);
+  position: relative;
+  isolation: isolate;
   display: grid;
-  grid-template-columns: 290px 1fr;
+  grid-template-columns: var(--tracks-column) minmax(0, 1fr);
   min-height: 0;
+}
+/* 접으면 칸은 남기고(악보·원본 칸이 왼쪽으로 밀려 자리가 바뀌지 않게) 너비 0으로 숨긴다 */
+.workspace.tracks-folded .tracks {
+  visibility: hidden;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.tracks-split {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--tracks-column) - 4px);
+  width: 8px;
+  z-index: 6;
+  cursor: col-resize;
+}
+.tracks-split:hover,
+.tracks-split.dragging {
+  background: linear-gradient(90deg, transparent 3px, var(--accent) 3px, var(--accent) 5px, transparent 5px);
+}
+.tracks-split button {
+  position: absolute;
+  top: 10px;
+  left: 0;
+  width: 18px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 0 6px 6px 0;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+.tracks-split button:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.workspace.tracks-folded .tracks-split {
+  left: 0;
+  cursor: default;
+}
+body.resizing-tracks {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .tracks {
@@ -343,6 +476,15 @@ dialog .field > span {
   font-size: 12px;
   color: var(--muted);
 }
+dialog .chord-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.chord-fields label { display: grid; gap: 3px; }
+.chord-fields select { width: 100%; padding: 5px; }
+.chord-shape { margin: 3px 0 11px; color: var(--muted); }
 dialog .check {
   display: flex;
   gap: 6px;
@@ -383,7 +525,21 @@ dialog .note {
 
 /* 원본 보기: 인식 결과 옆에 원본 쪽을 나란히 */
 .workspace.with-source {
-  grid-template-columns: 290px minmax(0, 1.25fr) minmax(320px, 1fr);
+  grid-template-columns: var(--tracks-column) minmax(0, 1.25fr) minmax(320px, 1fr);
+}
+@media (max-width: 760px) {
+  .topbar { flex-wrap: wrap; gap: 6px; }
+  .topbar .menu { min-width: 0; }
+  .file-name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .workspace { --tracks-column: min(var(--tracks-w), 36vw); }
+  .workspace.with-source { grid-template-columns: var(--tracks-column) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 0.75fr); }
+  .workspace.with-source .tracks { grid-row: 1 / -1; }
+  .workspace.with-source .source { grid-column: 2; }
+  .source-head { overflow-x: auto; }
+  .track { padding: 5px; }
+  .track-kind { display: none; }
+  .track-row input[type='range'] { flex-basis: 100%; }
+  .player { gap: 5px; padding: 6px 8px; }
 }
 .source {
   display: flex;
@@ -823,6 +979,10 @@ ul.note {
   padding-left: 20px;
 }
 
+/* 드럼: 마우스로 누른 음표의 파츠 단추 (지금 박자의 파츠는 on으로 칠해짐) */
+.palette button[data-kit].picked {
+  box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--ink);
+}
 .edit-cursor .note-pick {
   position: absolute;
   border: 2px solid var(--accent);
@@ -847,4 +1007,101 @@ ul.note {
 }
 .player button.link.warn:empty {
   display: none;
+}
+
+/* ---------- 펜 필기 ---------- */
+.ink-options:not([hidden]) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding: 5px 12px;
+  position: fixed;
+  right: 14px;
+  bottom: 84px;
+  z-index: 10;
+  max-width: calc(100vw - 28px);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 3px 12px #0002;
+  background: var(--panel);
+  font-size: 12px;
+}
+.ink-options label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ink-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 7;
+  overflow: visible;
+}
+.ink-stroke {
+  fill: none;
+  stroke: #1d5fd1;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: opacity 0.25s, stroke 0.15s;
+}
+.ink-stroke.ink-done {
+  stroke: #1b9a4b;
+  opacity: 0;
+}
+.ink-stroke.ink-fail {
+  stroke: #d23c3c;
+  opacity: 0.25;
+  transition: opacity 0.9s;
+}
+/* 필기 모드: 터치 스크롤은 직접 처리하므로 브라우저 스크롤을 막는다 (펜이 스크롤로 먹히지 않게) */
+.score-wrap.inking {
+  touch-action: none;
+  cursor: crosshair;
+}
+#inkBtn.on {
+  background: #1d5fd1;
+  color: #fff;
+}
+.ink-train {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+}
+.ink-train-ask {
+  font-size: 40px;
+  font-weight: 700;
+}
+.ink-train-ask small {
+  font-size: 14px;
+  font-weight: 400;
+  color: #777;
+}
+.ink-train-pad {
+  width: 260px;
+  height: 260px;
+  border: 2px dashed #aab;
+  border-radius: 10px;
+  background: #fff;
+  touch-action: none;
+  cursor: crosshair;
+}
+.ink-train-pad.done {
+  opacity: 0.4;
+}
+.ink-train-pad svg {
+  width: 100%;
+  height: 100%;
+}
+.ink-train-pad .ink-stroke {
+  stroke-width: 5;
+}
+.ink-train-guess {
+  min-height: 1.4em;
+  color: #555;
 }

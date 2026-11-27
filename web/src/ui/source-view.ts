@@ -137,3 +137,37 @@ export class SourceView {
     scroller.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
   }
 }
+
+/**
+ * 파트 파일 기준 원본 단 위치를 총보 마디 기준으로 옮긴다. origin[총보 마디] = 파트 파일 마디(없으면 null).
+ * 한 단이 총보의 떨어진 여러 곳에 쓰였으면(도돌이를 펼쳤다 다시 접은 곳 등) 이어진 덩어리마다 단을 하나씩 만든다.
+ */
+export function mapSystems(systems: SourceSystem[], origin: (number | null)[]): SourceSystem[] {
+  const out: SourceSystem[] = [];
+  for (const [page, y0, y1, first, count] of systems) {
+    let start = -1;
+    for (let f = 0; f <= origin.length; f++) {
+      const o = f < origin.length ? origin[f] : null;
+      const inside = o !== null && o >= first && o < first + count;
+      if (inside && start < 0) start = f;
+      if (!inside && start >= 0) {
+        out.push([page, y0, y1, start, f - start]);
+        start = -1;
+      }
+    }
+  }
+  return out.sort((a, b) => a[3] - b[3]);
+}
+
+/**
+ * 파일에 저장된 원본 정보가 쓸 만한지 보고 SourceRef로 (경로가 없거나 글자 하나뿐인 값 등은 null).
+ * 예전 시험 스크립트가 source에 "pdf-omr-vector" 같은 글자를 넣은 파일이 있어, 그대로 쓰면 원본 칸이 열리지 않았다
+ */
+export function cleanSource(x: unknown): SourceRef | null {
+  if (!x || typeof x !== 'object') return null;
+  const o = x as { path?: unknown; name?: unknown; systems?: unknown };
+  if (typeof o.path !== 'string' || !o.path) return null;
+  const name = typeof o.name === 'string' && o.name ? o.name : o.path.split(/[\\/]/).pop()!;
+  const systems = Array.isArray(o.systems) ? (o.systems.filter((r) => Array.isArray(r) && r.length === 5 && r.every((v) => typeof v === 'number')) as SourceRef['systems']) : [];
+  return { path: o.path, name, systems };
+}

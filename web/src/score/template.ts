@@ -8,7 +8,7 @@ export interface TemplateOptions {
   denominator: number;
   /** 조표 -7..7 */
   key: number;
-  parts: ('guitar1' | 'guitar2' | 'bass' | 'keys' | 'drums')[];
+  parts: ('vocal' | 'guitar1' | 'guitar2' | 'bass' | 'keys' | 'drums')[];
 }
 
 const KEY_NAMES: Record<number, string> = {
@@ -21,6 +21,8 @@ export function keyName(k: number): string {
 }
 
 const PART_TEX: Record<TemplateOptions['parts'][number], string> = {
+  // 보컬·멜로디: 높은음자리표 오선 하나 (소리는 플루트: 선율이 또렷하게 들림)
+  vocal: '\\track "보컬" "Vo" \\instrument 73 \\staff {score}',
   guitar1: '\\track "기타 1" "Gt1" \\instrument 29 \\staff {score tabs} \\tuning (E4 B3 G3 D3 A2 E2)',
   guitar2: '\\track "기타 2" "Gt2" \\instrument 27 \\staff {score tabs} \\tuning (E4 B3 G3 D3 A2 E2)',
   bass: '\\track "베이스" "Ba" \\instrument 33 \\staff {score tabs} \\tuning (G2 D2 A1 E1)',

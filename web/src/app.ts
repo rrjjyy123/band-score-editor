@@ -1,13 +1,14 @@
 import { AlphaTabApi, exporter, importer, LayoutMode, midi, model, PlayerMode, Settings, synth, SystemsLayoutMode } from '@coderline/alphatab';
-import { autosaveClear, autosaveRead, autosaveWrite, Cancelled, cancelRecognize, fromDropped, isDesktop, isScan, mcpReply, mcpWait, openFile, openFiles, openPath, pageImage, pageImages, recentFiles, recognize, saveFile, saveTo, tellDirty, type McpRequest, type McpResult, type OpenedFile } from './bridge';
+import { autosaveClear, autosaveRead, autosaveWrite, Cancelled, cancelRecognize, fromDropped, getHost, isDesktop, isScan, mcpReply, mcpWait, openFile, openFiles, openPath, pageImage, pageImages, recentFiles, recognize, saveFile, saveTo, tellDirty, type McpRequest, type McpResult, type OpenedFile } from './bridge';
 import { barHeader, FORMAT_HELP, parseBarLines, readBars, writeBar } from './score/textbar';
 import { cursorOf, ScoreDoc, type Cursor } from './score/doc';
 import * as ed from './score/edit';
-import { DRUM_KIT, drumByKey, drumName, normalizeDrumTrack, stripCustomSymbols } from './score/drums';
+import { articulationIndex, DRUM_KIT, drumKitAtLine, drumNotePreview, drumByKey, drumName, kitForArticulation, normalizeDrumTrack, stripCustomSymbols } from './score/drums';
 import { notePitch } from './score/notes';
 import { transposeTracks } from './score/transpose';
 import * as tr from './score/tracks';
 import { createDemo, createTemplate, keyName, type TemplateOptions } from './score/template';
+import { canvasToPng, renderImagePages } from './ui/image-export';
 import { exportMusicXml, fixMusicXmlCredits, restoreJumpWords, restoreSlashChords } from './score/musicxml';
 import { isNative, loadNative, loadNativeMeta, NATIVE_EXT, saveNative } from './score/native';
 import { dropEstimateMarks, isRecognizedXml, loadRecognized } from './score/omrfix';
@@ -15,11 +16,16 @@ import * as acc from './score/accomp';
 import { parsePitchName, pitchForLetter, pitchName, transposeKey } from './theory/pitch';
 import { choose, esc, info, progress, showDialog, toast } from './ui/dialog';
 import { formDialog } from './ui/form-view';
-import { SourceView, type SourceRef } from './ui/source-view';
+import { cleanSource, mapSystems, SourceView, type SourceRef } from './ui/source-view';
+import { pickChord } from './ui/chord-picker';
+import { InkPad, trainDialog } from './ui/ink-pad';
+import { recognize as recognizeInk, type Pt, type Stroke } from './ink/recognize';
+import { pitchAtStaffStep, recognizeNotation } from './ink/notation';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
 type Kind = 'drums' | 'stringed' | 'keys';
+type ScoreTool = 'select' | 'note' | 'rest' | 'erase';
 
 export class App {
   readonly settings = new Settings();
@@ -40,15 +46,34 @@ export class App {
   private pendingEdit: (() => void) | null = null;
   /** 지금 팔레트가 보여 주는 악기 종류 (바뀌면 기법 단추를 다시 만든다) */
   private paletteKind: Kind | null = null;
+  private scoreTool: ScoreTool = 'select';
+  private toolDuration = model.Duration.Quarter;
+  private toolDot = false;
+  private toolTriplet = false;
+  private toolDrum: number | null = null;
   /** Shift+←→로 고른 마디 구간 (커서가 있는 트랙) */
   private sel: { from: number; to: number } | null = null;
   /** 복사한 마디 (프로그램 안 클립보드) */
   private clip: ed.BarClip | null = null;
   /** 마지막으로 만든 밴드 총보의 재료 (곡 구조 맞추기를 다시 열 때) */
-  private lastBand: { parts: tr.PartFile[]; title: string; fold?: boolean; maps?: Record<string, (number | null)[]>; revision?: number } | null = null;
+  private lastBand: {
+    parts: tr.PartFile[];
+    title: string;
+    fold?: boolean;
+    maps?: Record<string, (number | null)[]>;
+    revision?: number;
+    /** parts와 같은 순서: 인식한 파트 원본 파일과 그 파일 기준 단 위치 (없으면 null) */
+    sources?: (SourceRef | null)[];
+  } | null = null;
   /** 이 악보를 인식한 원본 파일 (원본 보기) */
   private source: SourceRef | null = null;
+  /** 트랙마다 따로 정한 원본 (밴드 총보: 보컬·기타·베이스 PDF가 따로). 없으면 source */
+  private trackSources = new Map<number, SourceRef>();
+  /** 지금 원본 칸에 띄운 원본 */
+  private shownSource: SourceRef | null = null;
   private sourceView = new SourceView($('source'), $('sourcePages'));
+  /** 오선과 TAB의 펜 필기 */
+  private ink!: InkPad;
 
   constructor() {
     const s = this.settings;
@@ -66,17 +91,20 @@ export class App {
     s.display.resources.secondaryGlyphColor = black;
     s.player.playerMode = PlayerMode.EnabledSynthesizer;
     // 악기 소리: FluidR3 Mono GM(MuseScore 3 기본 소리, MIT). 어쿠스틱 피아노 세 가지는 아래에서 sonivox로 채운다
-    s.player.soundFont = new URL('./soundfont/FluidR3Mono_GM.sf3', document.baseURI).href;
+    // 다른 웹앱에 끼워 쓸 때(band-ensemble)는 그쪽 재생 설정을 따른다 (태블릿에서 24MB 사운드폰트는 소리가 안 나거나 끊김)
+    const hp = getHost()?.player;
+    s.player.soundFont = hp?.soundFont ?? new URL('./soundfont/FluidR3Mono_GM.sf3', document.baseURI).href;
     s.player.scrollElement = $('viewport');
     s.player.enableCursor = true;
-    s.player.enableAnimatedBeatCursor = true;
+    s.player.enableAnimatedBeatCursor = hp?.enableAnimatedBeatCursor ?? true;
+    if (hp?.bufferTimeInMilliseconds) s.player.bufferTimeInMilliseconds = hp.bufferTimeInMilliseconds;
     s.player.enableUserInteraction = true;
     s.player.scrollOffsetY = -60;
 
     this.api = new AlphaTabApi($('score'), s);
     // FluidR3의 어쿠스틱 피아노(0·1·3번)는 alphaTab에서 거의 소리가 안 나서 사운드폰트 파일에서 빼 두었다(bank 98).
     // 그 세 악기는 sonivox를 뒤에 덧붙여 채운다(악기를 찾을 때 앞 파일에 없으면 뒤 파일에서 찾음)
-    let pianoAdded = false;
+    let pianoAdded = !!hp?.soundFont;
     this.api.soundFontLoaded.on(() => {
       if (pianoAdded) return;
       pianoAdded = true;
@@ -88,7 +116,15 @@ export class App {
     this.buildPalette();
     this.buildPlayer();
     this.sourceView.onPick = (bar) => this.moveTo({ ...this.cursor, bar, beat: 0 });
+    this.setupTracksSplit();
     $('sourceClose').onclick = () => this.toggleSource(false);
+    $('sourcePick').onclick = async () => {
+      const src = await this.pickSource();
+      if (src && (await this.loadSource(src))) {
+        this.sourceView.show(true);
+        this.sourceView.showBar(this.cursor.bar);
+      }
+    };
     $('sourceZoomIn').onclick = () => this.sourceView.zoomBy(1.2);
     $('sourceZoomOut').onclick = () => this.sourceView.zoomBy(1 / 1.2);
 
@@ -111,11 +147,14 @@ export class App {
     });
     this.api.renderStarted.on(() => {
       this.rendering = true;
+      $('entryGuide').hidden = true;
+      this.ink?.cancel();
       this.resetRenderSlots();
     });
     // 마우스로 끌면 마디 구간을 고른다 (Shift+→와 같은 구간: 마디 지우기·복사·박자 맞춤 등에 쓰임). 같은 트랙 안에서만
     let dragFrom: { track: number; bar: number } | null = null;
     this.api.beatMouseDown.on((beat) => {
+      if (this.scoreTool !== 'select') return;
       // 음이 하나뿐인 박자는 숫자를 정확히 안 눌러도 그 음의 줄로 커서를 옮긴다 (붙임줄·기법이 엉뚱한 빈 줄에 걸리지 않게)
       const only = beat.voice.bar.staff.isStringed && beat.notes.length === 1 ? beat.notes[0].string : this.cursor.string;
       this.moveTo(cursorOf(beat, only));
@@ -133,10 +172,38 @@ export class App {
     this.api.beatMouseUp.on(() => (dragFrom = null));
     document.addEventListener('mouseup', () => (dragFrom = null));
     this.api.noteMouseDown.on((note) => {
+      if (this.scoreTool !== 'select') return;
+      // 드럼: 누른 음표(머리)가 어떤 파츠인지 위 입력 칸에서 따로 표시한다
+      if (note.beat.voice.bar.staff.isPercussion) {
+        this.drumPick = note.index;
+        this.updatePalette();
+        this.updateStatus();
+        return;
+      }
       if (note.isStringed) this.moveTo({ ...cursorOf(note.beat), string: note.string });
       // 키보드·보컬: 화음 안에서 누른 음 하나를 고른다 (↑↓·Delete가 그 음에만 적용)
       else if (!note.beat.voice.bar.staff.isPercussion && note.beat.notes.length > 1) this.moveTo({ ...cursorOf(note.beat, this.cursor.string), note: note.index }, true);
     });
+    this.ink = new InkPad(document.querySelector<HTMLElement>('.score-wrap')!, $('viewport'), {
+      onInk: (strokes) => this.applyInk(strokes),
+      onTap: (x, y) => this.tapAt(x, y),
+      allowAutoPen: () => this.scoreTool === 'select',
+      groupingMargins: (x, y) => {
+        const hit = this.hitAt(x, y);
+        return hit && !hit.isTab ? { x: hit.step * 1.8, y: hit.step * 3.3 } : null;
+      },
+      onPendingChange: (pending) => { $<HTMLButtonElement>('inkConvert').disabled = !pending; },
+      onModeChange: (on) => {
+        $('inkBtn').classList.toggle('on', on);
+        $('inkBtn').setAttribute('aria-pressed', String(on));
+        $('inkOptions').hidden = !on;
+      },
+    });
+    this.bindScoreTools();
+    $('inkConvert').onclick = () => this.ink.convertPending();
+    const delay = $<HTMLSelectElement>('inkDelay');
+    delay.value = String(this.ink.delay);
+    delay.onchange = () => this.ink.setDelay(Number(delay.value));
     this.api.playerReady.on(() => this.applyMixer());
     // 악보를 다시 그릴 때마다 재생 데이터를 새로 만들므로, 그때마다 음소거·혼자 듣기·음량과 재생 위치를 다시 맞춘다
     // (midiLoaded는 구독할 때 alphaTab 1.8.4의 무한 재귀 버그가 나서 쓰지 않는다. midiLoad는 재생 데이터를 넘기기 직전에 오므로
@@ -172,6 +239,7 @@ export class App {
     // exe에 파일을 넘겨 실행했으면 그 파일을 연다 (그 전에 갑자기 꺼져 남은 자동 저장이 있으면 복구를 묻는다)
     window.addEventListener('pywebviewready', () => (this.openStartupFile(), this.mcpLoop()));
     if (isDesktop()) (this.openStartupFile(), this.mcpLoop());
+    else if (getHost()) this.openHostStartup();
     else this.offerRecovery();
     // 1분마다 고친 내용을 따로 저장
     setInterval(() => this.autosave(), 60_000);
@@ -187,10 +255,17 @@ export class App {
     this.openBytes(fromB64(f.data), f.name);
   }
 
+  /** 끼워 쓰는 웹앱: 자동 저장 되살리기를 먼저 묻고, 아니면 그쪽이 준 곡을 연다 */
+  private async openHostStartup() {
+    if (await this.offerRecovery()) return;
+    const f = await getHost()!.startup();
+    if (f) this.openBytes(f.data, f.name);
+  }
+
   private async autosave() {
     if (!this.doc.dirty) return;
     try {
-      await autosaveWrite(this.doc.fileName, saveNative(this.doc.score, { source: this.source ?? undefined }));
+      await autosaveWrite(this.doc.fileName, saveNative(this.doc.score, this.sourceMeta()));
     } catch (e) {
       console.warn('자동 저장 실패', e);
     }
@@ -215,7 +290,8 @@ export class App {
     dropEstimateMarks(restored);
     this.loadScore(restored, saved.name);
     this.doc.dirty = true;
-    this.setSource(loadNativeMeta(saved.data).source ?? null, false);
+    this.setSource(cleanSource(loadNativeMeta(saved.data).source), false);
+    this.setTrackSources(loadNativeMeta(saved.data).sources);
     // 새 문서를 열면 자동 저장을 지우므로 바로 다시 남긴다
     await this.autosave();
     toast('되살렸습니다. 저장(Ctrl+S)해서 파일로 남기세요.', 5000);
@@ -229,7 +305,8 @@ export class App {
       const marks = dropEstimateMarks(native);
       this.loadScore(native, name);
       this.doc.dirty = false;
-      this.setSource(loadNativeMeta(data).source ?? null, false);
+      this.setSource(cleanSource(loadNativeMeta(data).source), false);
+      this.setTrackSources(loadNativeMeta(data).sources);
       toast(
         `${name} 열기 완료 (트랙 ${native.tracks.length}개, ${native.masterBars.length}마디)` +
           (marks.length ? ` · '리듬 추정' 표시를 지웠습니다(${marks.slice(0, 8).map((i) => i + 1).join('·')}${marks.length > 8 ? '…' : ''}마디, 리듬을 원본과 대조해 보세요)` : ''),
@@ -301,17 +378,20 @@ export class App {
     tellDirty(false);
     // 앞 문서의 밴드 총보 재료는 새 문서와 상관없다
     this.lastBand = null;
+    this.toolDrum = null;
     this.visible = new Set(score.tracks.map((t) => t.index));
     this.cursor = { track: 0, staff: 0, bar: 0, voice: 0, beat: 0, string: 1 };
     this.doc = doc;
     this.freshDoc = true;
     this.docPath = null;
     this.sel = null;
+    this.trackSources.clear();
     this.setSource(null, false);
     return doc;
   }
 
-  private loadScore(score: model.Score, name: string) {
+  /** 열 때 한 번 하는 손질 (loadScore와 수정본 비교가 같이 씀) */
+  private normalize(score: model.Score): model.Score {
     tr.assignChannels(score);
     // 박자에 붙은 악기 설정이 트랙 악기를 덮어쓰지 않게(예전 파일·인식 결과는 첫 박자에 피아노가 적혀 있음)
     tr.clearInstrumentAutomations(score);
@@ -321,17 +401,29 @@ export class App {
     // 셈여림을 적지 않은 악보(밴드 악보, 인식 결과)에 기본값 f가 찍히지 않게
     score.stylesheet.hideDynamics = !tr.hasDynamics(score);
     // 원본 악보 줄바꿈 정보가 있으면(인식 결과) 원본과 같은 자리에서 줄을 바꾼다
-    this.modelLayout = tr.layoutFromLineBreaks(score) || score.systemsLayout.length > 0;
+    const modelLayout = tr.layoutFromLineBreaks(score) || score.systemsLayout.length > 0;
+    // 끝쪽 줄바꿈을 못 찾아 한 줄에 몰린 마디(예: 18마디 한 줄)는 다른 줄 길이로 나눈다
+    if (modelLayout) tr.splitLongSystems(score);
     // 줄바꿈 정보가 없으면 한 줄에 4마디(alphaTab 기본 3마디는 밴드 악보에 너무 성김)
-    if (!this.modelLayout && score.defaultSystemsLayout === 3 && score.tracks.every((t) => t.defaultSystemsLayout === 3)) tr.setBarsPerLine(score, 4);
+    if (!modelLayout && score.defaultSystemsLayout === 3 && score.tracks.every((t) => t.defaultSystemsLayout === 3)) tr.setBarsPerLine(score, 4);
+    return score;
+  }
+
+  /** 끼워 쓰는 웹앱(학생 수정본 검토)용: .bscore를 편집기가 열 때와 똑같이 손본 악보로 만든다 (화면에는 열지 않음) */
+  prepareNative(data: Uint8Array): model.Score {
+    const score = loadNative(data, this.settings);
+    dropEstimateMarks(score);
+    return this.normalize(score);
+  }
+
+  private loadScore(score: model.Score, name: string) {
+    getHost()?.opened?.(name);
+    score = this.normalize(score);
     this.applyLayoutMode();
     this.newDoc(score, name);
     this.render();
     autosaveClear();
   }
-
-  /** 원본 줄바꿈 정보가 있는 악보인지 (인식 결과) */
-  private modelLayout = false;
 
   /** 마디 너비: 'even' 한 줄의 마디를 같은 너비로(기본, 마디마다 넓게·좁게 조절 가능), 'auto' 음표 양에 맞춰 */
   private barWidth: 'even' | 'auto' = (() => {
@@ -411,6 +503,7 @@ export class App {
     this.api.renderScore(this.withBorrowedLyrics(score, shownTracks), shownTracks);
     this.buildTracks();
     this.updateStatus();
+    this.updatePalette();
     this.updateMenuState();
   }
 
@@ -470,12 +563,90 @@ export class App {
     return staff.isStringed ? 'stringed' : 'keys';
   }
 
+  /**
+   * 왼쪽 파트 창: 경계를 끌어 너비를 바꾸고, 경계의 단추(또는 경계 두 번 누르기)로 접고 편다. 너비·접힘은 기억한다.
+   * 아주 좁게 끌면(120px 아래) 접힌다. 바뀌면 악보 칸 너비가 달라지므로 다시 그린다.
+   */
+  private setupTracksSplit() {
+    const ws = document.querySelector<HTMLElement>('.workspace')!;
+    const split = $('tracksSplit');
+    const fold = $('tracksFold');
+    const KEY = 'band-score.tracksWidth';
+    const read = () => {
+      try {
+        return JSON.parse(localStorage.getItem(KEY) ?? 'null') as { w: number; folded: boolean } | null;
+      } catch {
+        return null;
+      }
+    };
+    let state = read() ?? { w: 290, folded: false };
+    const apply = (relayout: boolean) => {
+      ws.style.setProperty('--tracks-w', state.folded ? '0px' : `${state.w}px`);
+      ws.classList.toggle('tracks-folded', state.folded);
+      fold.textContent = state.folded ? '▶' : '◀';
+      fold.title = state.folded ? '파트 창 펴기' : '파트 창 접기';
+      try {
+        localStorage.setItem(KEY, JSON.stringify(state));
+      } catch {
+        /* 기억 못 해도 지금은 적용 */
+      }
+      // 줄바꿈 판단은 창 크기 바뀜(resize)으로 다시 잰다. alphaTab은 악보 칸이 넓어질 때 스스로 다시 그리지 않을 때가 있어 직접 부른다
+      if (relayout) {
+        window.dispatchEvent(new Event('resize'));
+        setTimeout(() => (this.api as unknown as { triggerResize?: () => void }).triggerResize?.(), 60);
+      }
+    };
+    apply(false);
+    const toggle = () => {
+      state = { ...state, folded: !state.folded };
+      apply(true);
+    };
+    fold.onclick = (e) => (e.stopPropagation(), toggle());
+    split.ondblclick = (e) => {
+      if (e.target === fold) return;
+      toggle();
+    };
+    split.onpointerdown = (e) => {
+      if (e.target === fold || state.folded || e.button !== 0) return;
+      e.preventDefault();
+      split.setPointerCapture(e.pointerId);
+      split.classList.add('dragging');
+      document.body.classList.add('resizing-tracks');
+      const left = ws.getBoundingClientRect().left;
+      const move = (ev: PointerEvent) => {
+        const w = Math.round(ev.clientX - left);
+        state = w < 120 ? { ...state, folded: true } : { w: Math.min(600, Math.max(160, w)), folded: false };
+        apply(false);
+      };
+      const up = () => {
+        split.removeEventListener('pointermove', move);
+        split.classList.remove('dragging');
+        document.body.classList.remove('resizing-tracks');
+        // 접혔다면 다음에 펼 때는 전 너비로
+        if (state.folded) state = { ...state, w: Math.max(160, read()?.w ?? 290) };
+        apply(true);
+      };
+      split.addEventListener('pointermove', move);
+      split.addEventListener('pointerup', up, { once: true });
+      split.addEventListener('pointercancel', up, { once: true });
+    };
+  }
+
+  /** 드럼 박자에서 마우스로 누른 음표 (위 입력 칸의 그 파츠 단추에 테두리) */
+  private drumPick: number | null = null;
+
   moveTo(c: Cursor, keepNote = false) {
     // 화음 안의 음 고르기는 그 박자에 있을 때만: 다른 곳으로 가면 푼다
     if (!keepNote && c.note !== undefined) c = { ...c, note: undefined };
+    this.drumPick = null;
     const trackChanged = c.track !== this.cursor.track;
     if (this.sel && (trackChanged || c.bar < this.sel.from || c.bar > this.sel.to)) this.setSelection(null);
     this.cursor = this.doc.clampCursor(c);
+    if (trackChanged) {
+      this.toolDrum = null;
+      this.closePaletteMenu();
+      void this.followSourceTrack();
+    }
     const beat = this.doc.beatAt(this.cursor);
     if (!beat.isEmpty) this.inputDuration = beat.duration;
     if (!this.visible.has(this.cursor.track)) {
@@ -633,6 +804,7 @@ export class App {
     const k = e.key;
     const ctrl = e.ctrlKey || e.metaKey;
     const handled = () => e.preventDefault();
+    if (k === 'Enter' && !ctrl && target.id !== 'inkConvert' && this.ink.enabled && this.ink.convertPending()) return handled();
 
     if (ctrl && (k.toLowerCase() === 'y' || (e.shiftKey && k.toLowerCase() === 'z'))) return handled(), this.cmd('redo');
     if (ctrl && k.toLowerCase() === 'z') return handled(), this.cmd('undo');
@@ -640,11 +812,15 @@ export class App {
     if (ctrl && k.toLowerCase() === 'o') return handled(), this.cmd('open');
     if (ctrl && k.toLowerCase() === 'n') return handled(), this.cmd('new');
     if (ctrl && k.toLowerCase() === 'p') return handled(), this.cmd('print');
+    if ((k === ' ' || k === 'Enter' || k === 'Tab') && target.closest('#palette')) return;
     if (k === ' ') return handled(), this.playPause();
     if (k === 'F6') return handled(), this.cmd('source');
     if (k === 'F8') return handled(), this.cmd(e.shiftKey ? 'prev-problem' : 'next-problem');
     if (k === 'F9') return handled(), this.cmd('fit-bar');
     if (k === 'Escape') {
+      if (this.closePaletteMenu(true)) return handled();
+      if (this.scoreTool !== 'select') return handled(), this.setScoreTool('select');
+      if (this.ink.enabled) return handled(), this.ink.setEnabled(false);
       if (this.sel) return this.setSelection(null);
       this.playFrom = '';
       return this.api.stop();
@@ -714,8 +890,7 @@ export class App {
       return commit('음 지우기', (s) => ed.deleteNote(s, c));
     }
     if ((k === 'r' || k === 'R') && (ctrl || kind !== 'drums')) return handled(), commit('쉼표', (s) => ed.makeRest(s, c));
-    if (k === '.') return handled(), commit('점음표', (s) => ed.toggleDot(s, c));
-    if (k === '/') return handled(), commit('셋잇단음표', (s) => ed.toggleTriplet(s, c));
+    if (k === '.' || k === '/') return handled(), this.toggleRhythmModifier(k === '.' ? 'dot' : 'triplet');
     if (k === '+' || k === '=') return handled(), this.changeDuration(1);
     if (k === '-' || k === '_') return handled(), this.changeDuration(-1);
 
@@ -749,6 +924,348 @@ export class App {
     const c = this.cursor;
     const why = this.doc.tryCommit(label, (s) => ed.toggleTechnique(s, c, id));
     if (why) toast(why, 4000);
+  }
+
+  // ---------- 펜 필기 ----------
+
+  /** 같은 마디에서도 필기 위치의 높이로 오선, TAB 및 위·아래 오선을 구분한다. */
+  private hitAt(x: number, y: number) {
+    const lookup = this.api.boundsLookup;
+    if (!lookup || this.rendering) return null;
+    const initial = lookup.getBeatAtPos(x, y);
+    if (!initial) return null;
+    const bars = lookup.findBeats(initial)?.[0]?.barBounds.masterBarBounds.bars ?? [];
+    const nearest = bars
+      .filter(({ visualBounds: b, beats }) => beats.length && b.h > 0 && x >= b.x && x <= b.x + b.w)
+      .map((bar) => {
+        const b = bar.visualBounds;
+        return { bar, distance: Math.max(b.y - y, y - b.y - b.h, 0) };
+      })
+      .sort((a, b) => a.distance - b.distance)[0];
+    if (!nearest) return null;
+    const { bar } = nearest;
+    const bounds = bar.visualBounds;
+    const modelBar = bar.beats[0].beat.voice.bar;
+    const staff = modelBar.staff;
+    const siblings = bars.filter((b) => b.beats[0]?.beat.voice.bar === modelBar && b.visualBounds.h > 0);
+    const isTab = staff.isStringed && staff.showTablature && (!staff.showStandardNotation || bar === siblings.at(-1));
+    const isScore = staff.showStandardNotation && bar === siblings[0] && !isTab;
+    if (!isTab && !isScore) return null;
+    const step = bounds.h / (isTab ? Math.max(1, staff.tuning.length - 1) : 4);
+    if (nearest.distance > step * (isTab ? 1 : 2.2)) return null;
+    const voice = bar.beats.some((b) => b.beat.voice.index === this.cursor.voice) ? this.cursor.voice : 0;
+    const beats = bar.beats.filter((b) => b.beat.voice.index === voice);
+    const target = beats.reduce<typeof beats[number] | null>(
+      (best, b) => !best || Math.abs(b.onNotesX - x) < Math.abs(best.onNotesX - x) ? b : best,
+      null,
+    );
+    if (!target) return null;
+    const n = staff.tuning.length;
+    const string = isTab ? Math.min(n, Math.max(1, n - Math.round((y - bounds.y) / step))) : this.cursor.string;
+    return { beat: target.beat, target, isTab, string, right: target.visualBounds.x + target.visualBounds.w, step };
+  }
+
+  private bindScoreTools() {
+    const wrap = document.querySelector<HTMLElement>('.score-wrap')!;
+    const guide = $('entryGuide');
+    const glyph = guide.querySelector<HTMLElement>('.entry-glyph')!;
+    const label = guide.querySelector<HTMLElement>('.entry-label')!;
+    const point = (e: MouseEvent) => {
+      const r = wrap.getBoundingClientRect();
+      return { x: e.clientX - r.left, y: e.clientY - r.top };
+    };
+    const preview = ({ x, y }: { x: number; y: number }, touch: boolean) => {
+      const hit = this.scoreTool === 'note' ? this.hitAt(x, y) : null;
+      if (!hit || hit.isTab) {
+        guide.hidden = true;
+        return;
+      }
+      const top = hit.target.barBounds.visualBounds.y;
+      const halfSpace = hit.step / 2;
+      const kit = this.drumInputKit(hit, y);
+      if (touch && kit === null) {
+        guide.hidden = true;
+        return;
+      }
+      const drum = kit === null ? null : drumNotePreview(kit, this.toolDuration);
+      const step = drum?.line ?? Math.round((y - top) / halfSpace);
+      guide.classList.toggle('drum-guide', !!drum);
+      glyph.textContent = drum ? String.fromCodePoint(drum.head) : '';
+      label.textContent = kit === null ? '' : DRUM_KIT[kit].name;
+      guide.classList.toggle('guide-left', (wrap.getBoundingClientRect().left + x) > window.innerWidth - 125);
+      guide.style.left = `${x}px`;
+      guide.style.top = `${top + step * halfSpace}px`;
+      guide.hidden = false;
+    };
+    let down: { x: number; y: number } | null = null;
+    wrap.addEventListener('pointerdown', (e) => {
+      down = e.isPrimary ? point(e) : null;
+      if (down && e.pointerType === 'touch') preview(down, true);
+    }, true);
+    wrap.addEventListener('pointercancel', () => { down = null; guide.hidden = true; }, true);
+    wrap.addEventListener('pointerup', (e) => {
+      if (e.pointerType === 'touch') guide.hidden = true;
+    }, true);
+    wrap.addEventListener('click', (e) => {
+      if (this.scoreTool === 'select') return;
+      e.preventDefault();
+      e.stopPropagation();
+      const start = down;
+      down = null;
+      const { x, y } = point(e);
+      if (!start || Math.hypot(x - start.x, y - start.y) > 14) return;
+      void this.clickScore(x, y);
+    }, true);
+    wrap.addEventListener('pointermove', (e) => {
+      if (e.pointerType !== 'touch' || down) preview(point(e), e.pointerType === 'touch');
+    });
+    wrap.addEventListener('pointerleave', () => { guide.hidden = true; });
+  }
+
+  private drumInputKit(hit: NonNullable<ReturnType<App['hitAt']>>, y: number): number | null {
+    const staff = hit.beat.voice.bar.staff;
+    if (!staff.isPercussion) return null;
+    const step = Math.round((y - hit.target.barBounds.visualBounds.y) / (hit.step / 2));
+    return (staff.track.index === this.cursor.track ? this.toolDrum : null) ?? drumKitAtLine(step);
+  }
+
+  private staffPitch(hit: NonNullable<ReturnType<App['hitAt']>>, y: number, beat: model.Beat | null) {
+    const bar = hit.beat.voice.bar;
+    const staff = bar.staff;
+    const steps = Math.round((y - hit.target.barBounds.visualBounds.y) / (hit.step / 2));
+    const written = pitchAtStaffStep(bar.clef, bar.keySignature, steps);
+    if (written === null || staff.standardNotationLineCount !== 5) return null;
+    return written + staff.displayTranspositionPitch + 12 * (model.Ottavia.Regular - bar.clefOttava)
+      + (beat ? 12 * (model.Ottavia.Regular - beat.ottava) : 0) - (staff.isStringed ? staff.capo : 0);
+  }
+
+  private eraseAt(hit: NonNullable<ReturnType<App['hitAt']>>, x: number, y: number) {
+    const candidates = hit.target.barBounds.beats.flatMap((b) => b.notes ?? []);
+    let picked: model.Note | null = null;
+    let closest = Infinity;
+    for (const { note, noteHeadBounds: r } of candidates) {
+      if (x < r.x - 4 || x > r.x + r.w + 4 || y < r.y - 4 || y > r.y + r.h + 4) continue;
+      const d = Math.hypot(x - r.x - r.w / 2, y - r.y - r.h / 2);
+      if (d < closest) {
+        closest = d;
+        picked = note;
+      }
+    }
+    if (picked) {
+      const c = { ...cursorOf(picked.beat, picked.isStringed ? picked.string : hit.string), note: picked.index };
+      this.doc.commit('음 지우기', (s) => ed.deleteNote(s, c));
+      this.moveTo(c);
+      return;
+    }
+    if (hit.beat.isRest && !hit.beat.isEmpty && Math.abs(x - hit.target.onNotesX) <= hit.step) {
+      const c = cursorOf(hit.beat, hit.string);
+      this.doc.commit('쉼표 지우기', (s) => ed.deleteBeat(s, c));
+      this.moveTo(c);
+    }
+  }
+
+  private async clickScore(x: number, y: number) {
+    const hit = this.hitAt(x, y);
+    if (!hit) return;
+    if (this.scoreTool === 'erase') return this.eraseAt(hit, x, y);
+    const rest = this.scoreTool === 'rest';
+    const c = cursorOf(hit.beat, hit.string);
+    const previous = this.doc.beatAt(c);
+    const bounds = hit.target.barBounds.visualBounds;
+    const nearBeat = Math.abs(x - hit.target.onNotesX) <= hit.step * 0.85;
+    const insert = !previous.isEmpty && !nearBeat;
+    const before = insert && x < hit.target.onNotesX;
+    if (!previous.isEmpty && x < bounds.x + 2) return;
+    const dest = insert && !before ? { ...c, beat: c.beat + 1 } : c;
+    const chord = !rest && !insert && previous.notes.length > 0;
+    const duration = this.toolDuration;
+    const dots = this.toolDot;
+    const triplet = this.toolTriplet;
+    const staff = hit.beat.voice.bar.staff;
+    const kit = rest ? null : this.drumInputKit(hit, y);
+    const pitch = !rest && !hit.isTab && !staff.isPercussion ? this.staffPitch(hit, y, insert ? null : previous) : null;
+    if (!rest && !hit.isTab && kit === null && (pitch === null || pitch < 0 || pitch > 127)) return toast('이 오선 위치에 입력할 수 없어요');
+    if (!chord) {
+      const ticks = (3840 / duration) * (dots ? 1.5 : 1) * (triplet ? 2 / 3 : 1);
+      const used = previous.voice.beats.reduce((sum, b) => sum + (b.isEmpty ? 0 : b.displayDuration), 0);
+      const replaced = insert || previous.isEmpty ? 0 : previous.displayDuration;
+      const capacity = hit.beat.voice.bar.masterBar.calculateDuration();
+      if (used - replaced + ticks > Math.max(capacity, used)) return toast('이 마디에 들어갈 수 있는 음표 길이를 골라 주세요');
+    }
+    let fret: number | null = null;
+    if (!rest && hit.isTab) {
+      const doc = this.doc;
+      const score = doc.score;
+      const data = await showDialog(`TAB · ${hit.string}번 줄`, '<label class="field"><span>프렛</span><input name="fret" type="number" step="any" value="0"></label>', '입력');
+      if (!data || this.doc !== doc || doc.score !== score) return;
+      const rawFret = String(data.get('fret') ?? '').trim();
+      fret = rawFret ? Number(rawFret) : NaN;
+      if (!Number.isInteger(fret) || fret < 0 || fret > 24) return toast('프렛은 0~24 사이의 정수로 넣어 주세요');
+    }
+    const why = this.doc.tryCommit(rest ? '쉼표 입력' : '음표 입력', (score) => {
+      if (before) ed.insertBeatBefore(score, c);
+      else if (insert) ed.appendEmptyBeat(score, c, duration);
+      const beat = ed.beatAt(score, dest);
+      if (rest) ed.makeRest(score, dest);
+      else if (fret !== null) {
+        if (beat.getNoteOnString(dest.string)?.fret === fret) return '이미 같은 프렛이 있어요';
+        ed.setFret(score, dest, fret, duration);
+      } else if (kit !== null) {
+        const articulation = articulationIndex(beat.voice.bar.staff.track, kit);
+        if (beat.notes.some((n) => n.percussionArticulation === articulation)) return '이미 같은 드럼 음이 있어요';
+        ed.toggleDrum(score, dest, kit, duration);
+      } else if (pitch !== null) {
+        if (beat.notes.some((n) => notePitch(n) === pitch)) return '이미 같은 높이의 음이 있어요';
+        const count = beat.notes.length;
+        const string = ed.setPitch(score, dest, pitch, duration, true);
+        if (beat.notes.length === count) return '이 음을 연주할 수 있는 빈 줄이 없어요';
+        if (string !== null) dest.string = string;
+      }
+      if (!chord) {
+        beat.dots = Number(dots);
+        beat.tupletNumerator = triplet ? 3 : -1;
+        beat.tupletDenominator = triplet ? 2 : -1;
+        ed.setDuration(score, dest, duration);
+      }
+    });
+    if (why) return toast(why);
+    this.moveTo(dest);
+  }
+
+  private tapAt(x: number, y: number) {
+    const hit = this.hitAt(x, y);
+    if (hit) this.moveTo(cursorOf(hit.beat, hit.string));
+  }
+
+  /** TAB 숫자와 오선 기호를 필기한 위치에 적용한다. */
+  private applyInk(strokes: Stroke[]): boolean {
+    const all = strokes.flat();
+    const x0 = Math.min(...all.map((p) => p.x));
+    const x1 = Math.max(...all.map((p) => p.x));
+    const y0 = Math.min(...all.map((p) => p.y));
+    const y1 = Math.max(...all.map((p) => p.y));
+    const center = { x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
+    const hit = this.hitAt(center.x, center.y);
+    const staffInk = this.recognizeStaffInk(strokes, center);
+    if (staffInk) return this.applyStaffInk(staffInk.result, staffInk.hit, { x0, x1, y0, y1 });
+    if (!hit) return toast('악보의 마디 위에 써 주세요'), false;
+    if (!hit.isTab) {
+      const staff = hit.beat.voice.bar.staff;
+      toast(staff.isPercussion || staff.standardNotationLineCount !== 5
+        ? '필기 음표는 일반 오선에서 입력할 수 있어요'
+        : '음표 머리와 기둥을 또렷하게 써 주세요');
+      return false;
+    }
+    const res = recognizeInk(strokes);
+    if (!res) return toast('글씨를 못 알아봤어요. 악보 ▾ ▸ 내 글씨 익히기를 하면 더 잘 읽어요', 4000), false;
+    const staff = hit.beat.voice.bar.staff;
+    let c = cursorOf(hit.beat, hit.string);
+    if (res.kind === 'erase') {
+      const beat = this.doc.beatAt(c);
+      const target = staff.isStringed ? beat.getNoteOnString(c.string) : beat.notes[0];
+      if (!target) return toast('지울 음이 없어요'), false;
+      this.moveTo(c);
+      this.cursor = { ...this.cursor, note: undefined };
+      this.doc.commit('음 지우기', (s) => ed.deleteNote(s, this.cursor));
+      return true;
+    }
+    if (!staff.isStringed || !staff.showTablature) return toast('숫자 쓰기는 기타·베이스 TAB 줄 위에서 돼요'), false;
+    const fret = Number(res.text);
+    if (!(fret >= 0 && fret <= 24)) return toast(`${res.text}프렛은 너무 높아요`), false;
+    // 마디 마지막 음 오른쪽 빈자리에 쓰면 박자를 새로 만든다 (마디가 아직 모자랄 때만)
+    const doc = this.doc.beatAt(c);
+    const lastInBar = c.beat === doc.voice.beats.length - 1;
+    const append = lastInBar && !doc.isEmpty && x0 > hit.right + hit.step * 0.8 && ed.barFill(doc.voice.bar) < 0;
+    this.moveTo(c);
+    c = this.cursor;
+    this.doc.commit(`프렛 ${fret}`, (s) => {
+      if (append) {
+        ed.appendEmptyBeat(s, c, this.inputDuration);
+        ed.setFret(s, { ...c, beat: c.beat + 1 }, fret, this.inputDuration);
+      } else ed.setFret(s, c, fret, this.inputDuration);
+    });
+    if (append) this.moveTo({ ...c, beat: c.beat + 1 });
+    const n = this.doc.beatAt(this.cursor).getNoteOnString(this.cursor.string);
+    if (n) this.api.playNote(this.liveNote(this.cursor, n.string) ?? n);
+    return true;
+  }
+
+  private recognizeStaffInk(strokes: Stroke[], center: Pt) {
+    // 긴 기둥이나 꼬리를 포함하면 전체 획의 중앙은 다른 오선이나 TAB 위에 올 수 있다.
+    // 각 획의 대표점으로 후보 오선을 찾고, 실제 머리가 그 오선에 있을 때만 받아들인다.
+    const probes = [center];
+    for (const stroke of strokes) {
+      if (!stroke.length) continue;
+      probes.push(stroke[0], stroke[Math.floor(stroke.length / 2)], stroke[stroke.length - 1]);
+    }
+    const checked = new Set<NonNullable<ReturnType<App['hitAt']>>['target']['barBounds']>();
+    for (const p of probes) {
+      const sample = this.hitAt(p.x, p.y);
+      if (!sample || sample.isTab || sample.beat.voice.bar.staff.isPercussion
+        || sample.beat.voice.bar.staff.standardNotationLineCount !== 5 || checked.has(sample.target.barBounds)) continue;
+      checked.add(sample.target.barBounds);
+      const result = recognizeNotation(strokes, sample.step);
+      if (!result) continue;
+      const hit = this.hitAt(result.anchor.x, result.anchor.y);
+      if (hit?.target.barBounds === sample.target.barBounds) return { result, hit };
+    }
+    return null;
+  }
+
+  private applyStaffInk(
+    result: NonNullable<ReturnType<typeof recognizeNotation>>,
+    hit: NonNullable<ReturnType<App['hitAt']>>,
+    area: { x0: number; x1: number; y0: number; y1: number },
+  ): boolean {
+    const fail = (message: string) => { toast(message); return false; };
+    const bar = hit.beat.voice.bar;
+    const c = cursorOf(hit.beat, hit.string);
+    const beat = this.doc.beatAt(c);
+
+    if (result.kind === 'erase') {
+      const note = hit.target.notes?.find(({ noteHeadBounds: r }) => {
+        const x = r.x + r.w / 2;
+        const y = r.y + r.h / 2;
+        return x >= area.x0 - 2 && x <= area.x1 + 2 && y >= area.y0 - 2 && y <= area.y1 + 2;
+      })?.note;
+      if (!note) return fail('지우려는 음표 머리 위를 긁어 주세요');
+      const picked = { ...c, note: note.index, string: note.isStringed ? note.string : c.string };
+      this.moveTo(picked);
+      this.doc.commit('음 지우기', (s) => ed.deleteNote(s, picked));
+      return true;
+    }
+
+    const append = !beat.isEmpty && c.beat === beat.voice.beats.length - 1
+      && result.anchor.x > Math.max(hit.right, hit.target.onNotesX + hit.step);
+    if (append || beat.isEmpty) {
+      const used = beat.voice.beats.reduce((sum, b) => sum + (b.isEmpty ? 0 : b.displayDuration), 0);
+      if (used + 3840 / result.duration > bar.masterBar.calculateDuration()) return fail('마디에 이 길이를 넣을 자리가 없어요');
+    }
+    if (!append && !beat.isEmpty && beat.notes.length) {
+      if (result.kind === 'rest') return fail('쉼표를 쓰려면 먼저 음표를 지워 주세요');
+      if (beat.duration !== result.duration) return fail('화음에 더하려면 기존 음표와 같은 길이로 써 주세요');
+    }
+    const pitch = result.kind === 'note' ? this.staffPitch(hit, result.anchor.y, append ? null : beat) : null;
+    if (result.kind === 'note' && pitch === null) return fail('이 음자리표에는 필기 입력을 사용할 수 없어요');
+    const dest = append ? { ...c, beat: c.beat + 1 } : c;
+    const why = this.doc.tryCommit(result.kind === 'rest' ? '필기 쉼표' : '필기 음표', (score) => {
+      if (append) ed.appendEmptyBeat(score, c, result.duration);
+      if (result.kind === 'rest') {
+        ed.makeRest(score, dest);
+        ed.setDuration(score, dest, result.duration);
+      } else if (pitch !== null) {
+        const target = ed.beatAt(score, dest);
+        if (target.notes.some((n) => notePitch(n) === pitch)) return '같은 높이의 음이 이미 있어요';
+        if (pitch < 0 || pitch > 127) return '이 위치는 악기 범위를 벗어나요';
+        const count = target.notes.length;
+        ed.setPitch(score, dest, pitch, result.duration, true);
+        if (target.notes.length === count) return '이 음을 연주할 수 있는 빈 줄이 없어요';
+        if (!count) ed.setDuration(score, dest, result.duration);
+      }
+    });
+    if (why) return fail(why);
+    this.moveTo(dest);
+    return true;
   }
 
   private typeFret(digit: string) {
@@ -800,6 +1317,12 @@ export class App {
   /** 글자 입력 기준음: 이 박자나 앞 박자의 음, 없으면 가운데 도 */
   private nearPitch(beat: model.Beat): number {
     for (let b: model.Beat | null = beat; b; b = b.previousBeat) if (b.notes.length) return notePitch(b.notes[b.notes.length - 1]);
+    // 앞에 음이 없으면 오선 가운데 줄 음 근처에서 시작 (보컬 첫 음이 덧줄 아래로 가지 않게)
+    const bar = beat.voice.bar;
+    // (오선이 하나뿐인 트랙만: 피아노 큰보표는 지금처럼 가운데 도 기준)
+    const single = !bar.staff.isStringed && bar.staff.track.staves.length === 1;
+    if (single && bar.clef === model.Clef.G2 && bar.clefOttava === model.Ottavia.Regular) return 71;
+    if (single && bar.clef === model.Clef.F4) return 50;
     return 60;
   }
 
@@ -816,6 +1339,8 @@ export class App {
 
   private setInputDuration(d: model.Duration) {
     this.inputDuration = d;
+    this.toolDuration = d;
+    if (this.scoreTool !== 'select') return this.updatePalette();
     const beat = this.doc.beatAt(this.cursor);
     if (!beat.isEmpty) this.doc.commit('음 길이', (s) => ed.setDuration(s, this.cursor, d));
     else this.updatePalette();
@@ -824,7 +1349,7 @@ export class App {
   private changeDuration(dir: 1 | -1) {
     const order = ed.DURATIONS.map((d) => d.value);
     const beat = this.doc.beatAt(this.cursor);
-    const cur = order.indexOf(beat.isEmpty ? this.inputDuration : beat.duration);
+    const cur = order.indexOf(this.scoreTool !== 'select' ? this.toolDuration : beat.isEmpty ? this.inputDuration : beat.duration);
     const next = order[Math.min(order.length - 1, Math.max(0, (cur < 0 ? 2 : cur) + dir))];
     this.setInputDuration(next);
   }
@@ -972,7 +1497,7 @@ export class App {
     if (!best || best.d > 200) return;
     const c = cursorOf(best.beat, this.cursor.string);
     if (best.kind === 'lyric') this.editLyric(c, rect);
-    else this.editChord(c, rect);
+    else void this.editChord(c);
   }
 
   /** 악보 위에 작은 입력칸을 띄운다. Enter 확정, Esc 취소, Tab(가사는 Space도) 다음 박자 */
@@ -1046,21 +1571,18 @@ export class App {
     });
   }
 
-  private editChord(c: Cursor, rect?: { left: number; top: number; width: number; height: number }) {
-    const r = rect ?? this.beatRect(c, 'above');
-    if (!r) return;
-    const cur = this.doc.beatAt(c).chord?.name ?? '';
-    this.inlineInput(r, cur, false, (v, move) => {
-      const next = move ? this.noteBeatFrom(c, move) : null;
-      if (next) this.cursor = next;
-      if (v !== cur) {
-        if (next) this.pendingEdit = () => this.editChord(next);
-        this.doc.commit('코드 이름', (s) => ed.setChordName(s, c, v));
-      } else if (next) {
-        this.moveTo(next);
-        this.editChord(next);
-      }
-    });
+  private async editChord(c: Cursor) {
+    const doc = this.doc;
+    const score = doc.score;
+    const beat = doc.beatAt(c);
+    const current = beat.chord;
+    const staff = beat.voice.bar.staff;
+    const result = await pickChord(current?.name ?? '', staff.isStringed ? staff.tuning : [], current?.showDiagram && current.strings.length ? current.strings : undefined);
+    if (!result || this.doc !== doc || doc.score !== score) return;
+    const oldShape = current?.showDiagram && current.strings.length ? current.strings.join(',') : undefined;
+    if (result.name === (current?.name ?? '') && result.diagram?.join(',') === oldShape) return;
+    this.moveTo(c);
+    doc.commit('코드 기호', (s) => ed.setChordName(s, c, result.name, { frets: result.diagram }));
   }
 
   // ---------- 확대 ----------
@@ -1140,7 +1662,6 @@ export class App {
       /* 무시 */
     }
     this.doc.commit('한 줄 마디 수', (s) => tr.setBarsPerLine(s, n));
-    this.modelLayout = true;
     if (this.applyLayoutMode()) this.render();
     this.updateMenuState();
   }
@@ -1152,6 +1673,12 @@ export class App {
           return this.doc.undo();
         case 'redo':
           return this.doc.redo();
+        case 'ink':
+          this.setScoreTool('select', false);
+          this.ink.setEnabled(!this.ink.enabled);
+          return;
+        case 'ink-train':
+          return await trainDialog();
         case 'new':
           return await this.newScore();
         case 'open':
@@ -1328,6 +1855,7 @@ export class App {
       .map((k) => `<option value="${k}" ${k === 0 ? 'selected' : ''}>${keyName(k)}장조 / ${keyName(transposeKey(k, -3))}단조</option>`)
       .join('');
     const parts: [TemplateOptions['parts'][number], string][] = [
+      ['vocal', '보컬·멜로디'],
       ['guitar1', '기타 1 (리드)'],
       ['guitar2', '기타 2 (리듬)'],
       ['bass', '베이스'],
@@ -1403,6 +1931,7 @@ export class App {
   /** 원본 파일 정하기. show면 바로 옆에 띄운다 */
   private async setSource(src: SourceRef | null, show: boolean) {
     this.source = src;
+    this.shownSource = null;
     this.sourceView.clear();
     $('sourceBtn').classList.remove('on');
     if (src && show) await this.toggleSource(true);
@@ -1410,21 +1939,25 @@ export class App {
 
   /** 원본 보기 켜고 끄기. 원본을 모르는 악보(직접 만든 악보, 다른 프로그램 파일)는 대조할 PDF·사진을 고르게 한다 */
   private async toggleSource(on: boolean) {
-    if (on && !this.sourceView.hasPages) {
+    if (on) {
       if (!isDesktop()) return void (await info('원본 보기', '<p>원본 보기는 exe 프로그램에서 PDF·사진을 인식했을 때 쓸 수 있습니다.</p>'));
-      if (!this.source) {
-        const f = await openFile('pdf');
-        if (!f?.path) return;
-        this.source = { path: f.path, name: f.name, systems: [] };
+      let src = this.sourceFor() ?? (await this.pickSource());
+      if (!src) return;
+      if (!(await this.loadSource(src))) {
+        // 원본을 옮겼거나 다른 컴퓨터에서 인식한 악보: 원본 칸이 안 열려 [다른 원본…]도 못 누르므로 여기서 바로 고르게 한다
+        const r = await choose(
+          '원본 파일을 찾을 수 없습니다',
+          `<p><b>${esc(src.name)}</b>을(를) 찾을 수 없습니다. 파일을 옮겼거나 이름을 바꿨거나, 다른 컴퓨터에서 인식한 악보일 수 있습니다.</p>
+           <p>원본 PDF·사진을 직접 고를까요?</p>`,
+          [
+            { value: 'close', label: '닫기' },
+            { value: 'pick', label: '파일 고르기', primary: true },
+          ],
+        );
+        if (r !== 'pick') return;
+        src = await this.pickSource();
+        if (!src || !(await this.loadSource(src))) return;
       }
-      const pages = await pageImages(this.source.path);
-      if (!pages) {
-        const gone = this.source.name;
-        this.source = null;
-        return toast(`원본 파일(${gone})을 찾을 수 없습니다. 원본 보기를 다시 눌러 파일을 고르세요.`, 6000);
-      }
-      this.sourceView.set(pages, this.source.systems);
-      $('sourceName').textContent = this.source.name;
     }
     this.sourceView.show(on);
     $('sourceBtn').classList.toggle('on', on);
@@ -1433,10 +1966,114 @@ export class App {
     this.render();
   }
 
+  /** 이 트랙의 원본: 트랙마다 따로 정했으면 그것, 아니면 악보 전체의 원본 */
+  private sourceFor(track = this.cursor.track): SourceRef | null {
+    return this.trackSources.get(track) ?? this.source;
+  }
+
+  /** .bscore에 함께 저장하는 원본 정보 */
+  private sourceMeta() {
+    return {
+      source: this.source ?? undefined,
+      sources: this.trackSources.size ? Object.fromEntries([...this.trackSources].map(([k, v]) => [String(k), v])) : undefined,
+    };
+  }
+
+  private setTrackSources(m?: Record<string, unknown>) {
+    this.trackSources = new Map(
+      Object.entries(m && typeof m === 'object' ? m : {})
+        .map(([k, v]) => [Number(k), cleanSource(v)] as const)
+        .filter((e): e is readonly [number, SourceRef] => e[1] !== null && Number.isInteger(e[0])),
+    );
+    this.shownSource = null;
+  }
+
+  /** 원본 쪽 그림을 원본 칸에 띄운다 (이미 띄운 원본이면 그대로). 파일을 못 찾으면 false */
+  private async loadSource(src: SourceRef): Promise<boolean> {
+    if (this.shownSource === src && this.sourceView.hasPages) return true;
+    let pages: string[] | null = null;
+    try {
+      pages = await pageImages(src.path);
+    } catch {
+      pages = null;
+    }
+    if (!pages) return false;
+    this.sourceView.set(pages, src.systems);
+    this.shownSource = src;
+    const own = this.trackSources.get(this.cursor.track) === src;
+    $('sourceName').textContent = own ? `${src.name} · ${this.doc.score.tracks[this.cursor.track]?.name ?? ''}` : src.name;
+    return true;
+  }
+
+  /** 원본 칸이 열려 있을 때 커서가 다른 트랙으로 가면 그 트랙의 원본으로 바꾼다 */
+  private async followSourceTrack() {
+    if (!this.sourceView.visible) return;
+    const src = this.sourceFor();
+    if (!src || src === this.shownSource) return;
+    if (await this.loadSource(src)) this.sourceView.showBar(this.cursor.bar);
+    else toast(`이 트랙의 원본 파일(${src.name})을 찾을 수 없습니다. 원본 칸의 [다른 원본…]으로 고르세요.`, 6000);
+  }
+
+  /**
+   * 원본 PDF·사진을 고른다. 트랙이 여럿이면 이 트랙만인지 모든 트랙인지 묻는다
+   * (밴드 총보처럼 악기마다 원본이 다르면 트랙마다 따로 정해 두고, 트랙을 옮기면 그 원본이 보인다)
+   */
+  private async pickSource(): Promise<SourceRef | null> {
+    if (!isDesktop()) return void (await info('원본 보기', '<p>원본 보기는 exe 프로그램에서 쓸 수 있습니다.</p>')), null;
+    const f = await openFile('pdf');
+    if (!f?.path) return null;
+    const src: SourceRef = { path: f.path, name: f.name, systems: [] };
+    const tracks = this.doc.score.tracks;
+    const track = tracks[this.cursor.track];
+    let scope = 'all';
+    if (tracks.length > 1) {
+      scope =
+        (await choose(
+          '원본 파일',
+          `<p><b>${esc(f.name)}</b>을(를) 어느 트랙의 원본으로 쓸까요?</p>
+          <p class="note">밴드 총보처럼 악기마다 PDF가 따로 있으면 '${esc(track.name)}만'으로 트랙마다 정하세요. 커서를 다른 트랙으로 옮기면 그 트랙의 원본이 보입니다.</p>`,
+          [
+            { value: 'all', label: '모든 트랙' },
+            { value: 'track', label: `${track.name}만`, primary: true },
+          ],
+        )) ?? '';
+      if (!scope) return null;
+    }
+    if (scope === 'track') this.trackSources.set(this.cursor.track, src);
+    else {
+      this.source = src;
+      this.trackSources.delete(this.cursor.track);
+    }
+    // 원본 정보도 .bscore에 저장되므로 저장할 것이 생긴 것으로
+    this.doc.dirty = true;
+    return src;
+  }
+
   private async save(askWhere: boolean) {
+    // 재생 막대 ♩=는 재생 빠르기라 악보에 저장되지 않는다. 바꾼 채로 저장하면 악보에 적을지 묻는다
+    // (♩=를 바꾸고 저장했는데 다시 열면 원래 빠르기로 돌아간다는 혼동을 막음)
+    const base = this.doc.score.tempo || 120;
+    const bpm = this.currentBpm();
+    if (bpm !== base) {
+      const r = await choose(
+        '빠르기',
+        `<p>재생 막대의 <b>♩=${bpm}</b>은 들어 볼 때의 재생 빠르기라 악보에는 저장되지 않습니다 (악보는 ♩=${base}).</p><p>악보 빠르기를 ♩=${bpm}(으)로 바꿔서 저장할까요?</p>`,
+        [
+          { value: 'keep', label: `악보는 ♩=${base} 그대로` },
+          { value: 'write', label: `♩=${bpm}(으)로 적고 저장`, primary: true },
+        ],
+      );
+      if (!r) return;
+      if (r === 'write') this.writeBpmToScore();
+    }
     const name = this.doc.fileName.replace(/\.[^.]+$/, '') + NATIVE_EXT;
-    const data = saveNative(this.doc.score, { source: this.source ?? undefined });
-    const where = !askWhere && this.docPath && isDesktop() ? await saveTo(this.docPath, data) : await saveFile(name, data, 'bscore');
+    const data = saveNative(this.doc.score, this.sourceMeta());
+    const host = getHost();
+    const where = host
+      ? await host.saveScore(name, data, askWhere)
+      : !askWhere && this.docPath && isDesktop()
+        ? await saveTo(this.docPath, data)
+        : await saveFile(name, data, 'bscore');
     if (!where) return;
     if (isDesktop()) this.docPath = where;
     autosaveClear();
@@ -1455,6 +2092,7 @@ export class App {
         <label class="check"><input type="radio" name="fmt" value="musicxml"> <b>MusicXML</b> (.musicxml) — MuseScore, Sibelius, Finale</label>
         <label class="check"><input type="radio" name="fmt" value="mid"> <b>MIDI</b> (.mid) — 반주 음원, 다른 음악 프로그램</label>
         <label class="check"><input type="radio" name="fmt" value="pdf"> <b>PDF·인쇄</b> — 학생에게 나눠 줄 파트보</label>
+        <label class="check"><input type="radio" name="fmt" value="png"> <b>그림</b> (.png) — 쪽마다 그림 파일 (메신저로 보내기, 태블릿에 저장)</label>
       </div>
       <p class="note">.bscore가 아닌 형식은 일부 정보(트랙별 조표, 원본 보기 등)가 빠질 수 있어, 저장 안 한 변경 표시(●)는 그대로 남습니다.</p>`,
       '저장',
@@ -1471,6 +2109,8 @@ export class App {
         return await this.exportMidi();
       case 'pdf':
         return await this.printDialog();
+      case 'png':
+        return await this.printDialog(true);
     }
   }
 
@@ -1507,6 +2147,7 @@ export class App {
 
   private async addTrackDialog() {
     const parts: [TemplateOptions['parts'][number], string][] = [
+      ['vocal', '보컬·멜로디 (오선)'],
       ['guitar1', '기타 (리드)'],
       ['guitar2', '기타 (리듬)'],
       ['bass', '베이스'],
@@ -1516,7 +2157,7 @@ export class App {
     const r = await showDialog(
       '새 트랙 추가',
       `<div class="field"><span>악기</span>${parts.map(([id, l], i) => `<label class="check"><input type="radio" name="part" value="${id}" ${i ? '' : 'checked'}> ${l}</label>`).join('')}</div>
-      <p class="note">지금 악보와 같은 마디 수의 빈 트랙이 맨 아래에 생깁니다. 다른 악기(보컬 등)는 만든 뒤 트랙의 '⋯ → 악기'에서 바꾸세요.</p>`,
+      <p class="note">지금 악보와 같은 마디 수의 빈 트랙이 맨 아래에 생깁니다. 다른 악기(피아노·스트링 등)는 만든 뒤 트랙의 '⋯ → 악기'에서 바꾸세요.</p>`,
       '추가',
     );
     if (!r) return;
@@ -1766,25 +2407,33 @@ export class App {
     );
     if (!r) return;
     const parts: tr.PartFile[] = [];
+    /** parts와 같은 순서로 파트 원본 PDF·사진 (총보의 그 트랙 원본으로 붙인다) */
+    const partSources: (SourceRef | null)[] = [];
     const p = scans ? progress('파트 악보 인식 중', cancelRecognize) : null;
     try {
       for (const [i, f] of files.entries()) {
         const role = String(r.get(`role${i}`) ?? '') as tr.PartRole | '';
         if (!role) continue;
         let data = f.data;
+        let src: SourceRef | null = null;
         if (isScan(f.name)) {
           const res = await recognize(f, (stage, pct) => p!.update(`${f.name}: ${stage}`, pct));
           data = res.data;
+          // 단 위치는 이 파트 파일의 마디 순번 기준. 총보를 만든 뒤 총보 마디로 옮긴다 (applyPartSources)
+          const path = res.source ?? f.path;
+          if (path) src = { path, name: f.name, systems: res.systems ?? [] };
         }
+        partSources.push(src);
         parts.push({ score: isScan(f.name) ? loadRecognized(data, this.settings) : this.loadAny(data, f.name), role, capo: role === 'guitar' ? Number(r.get('capo')) || 0 : undefined });
       }
     } finally {
       p?.close();
     }
     if (!parts.length) return;
-    this.lastBand = { parts, title: String(r.get('title') || title) };
+    this.lastBand = { parts, title: String(r.get('title') || title), sources: partSources };
     const report = await this.formCheck(false);
     if (!report) return;
+    const attached = this.trackSources.size;
     const bars = Object.entries(report.bars);
     const differ = new Set(bars.map(([, n]) => n)).size > 1;
     await info(
@@ -1795,8 +2444,24 @@ export class App {
       ${report.form.folded.length ? `<p class="note">모든 파트가 똑같이 되풀이하는 곳을 도돌이표로 접었습니다: ${report.form.folded.map((f) => `${f.start + 1}~${f.start + f.length}마디 ×${f.times}`).join(', ')}</p>` : ''}
       ${report.tabRead.length ? `<p class="note">TAB 숫자를 읽어 원본의 줄·프렛을 그대로 쓴 파트: ${report.tabRead.map(esc).join(', ')}</p>` : ''}
       ${report.dropped.length ? `<p class="note">뺀 줄: ${report.dropped.map(esc).join(', ')}</p>` : ''}
-      ${report.outOfRange ? `<p class="note">악기 음역 밖이라 빨간색으로 표시한 음: ${report.outOfRange}개</p>` : ''}`,
+      ${report.outOfRange ? `<p class="note">악기 음역 밖이라 빨간색으로 표시한 음: ${report.outOfRange}개</p>` : ''}
+      ${attached ? `<p class="note">원본 보기(F6): 트랙마다 그 파트의 PDF·사진이 붙어 있어 커서를 옮긴 트랙의 원본이 보입니다 (${attached}개 트랙).</p>` : ''}`,
     );
+  }
+
+  /**
+   * 밴드 총보: 트랙마다 그 트랙이 나온 파트 파일을 원본으로 붙이고, 파트 파일 기준 단 위치를 총보 마디로 옮긴다
+   * (도돌이 펼치기·곡 구조 맞추기·다시 접기를 거친 대응은 report.trackOrigins). 총보에서 커서가 있는 줄을 그 파트 원본에서 짚어 준다
+   */
+  private applyPartSources(report: tr.AssembleReport) {
+    const srcs = this.lastBand?.sources;
+    this.trackSources.clear();
+    this.shownSource = null;
+    if (!srcs) return;
+    report.trackOrigins.forEach((o, ti) => {
+      const src = srcs[o.part];
+      if (src && ti < this.doc.score.tracks.length) this.trackSources.set(ti, { ...src, systems: mapSystems(src.systems, o.bars) });
+    });
   }
 
   /**
@@ -1838,6 +2503,8 @@ export class App {
       }
       this.doc.replace('곡 구조 맞추기', built.score);
       this.lastBand = { ...band, fold, maps, revision: this.doc.revision };
+      this.applyPartSources(built.report);
+      if (this.sourceView.visible) void this.followSourceTrack();
       toast('곡 구조를 다시 맞췄습니다. 실행 취소(Ctrl+Z)로 되돌릴 수 있습니다.', 4000);
       return built.report;
     }
@@ -1845,22 +2512,29 @@ export class App {
     this.doc.dirty = true;
     // loadScore가 앞 문서의 재료를 지우므로 다시 넣는다. 이 뒤로 고쳤는지는 revision으로 안다
     this.lastBand = { ...band, fold, maps, revision: this.doc.revision };
+    this.applyPartSources(built.report);
     return built.report;
   }
 
-  private async printDialog() {
+  /** 인쇄(PDF) 또는 그림(PNG)으로 파트보 만들기. 트랙·기타 표시 고르기는 같다 */
+  private async printDialog(image = false) {
     const score = this.doc.score;
     const list = score.tracks
       .map((t) => `<label class="check"><input type="checkbox" name="t" value="${t.index}" ${this.visible.has(t.index) ? 'checked' : ''}> ${esc(t.name)}</label>`)
       .join('');
     const r = await showDialog(
-      '인쇄 / 파트보',
-      `<div class="field"><span>인쇄할 트랙 (하나만 고르면 그 악기의 파트보)</span>${list}</div>
+      image ? '그림으로 저장 / 파트보' : '인쇄 / 파트보',
+      `<div class="field"><span>${image ? '그림으로 만들' : '인쇄할'} 트랙 (하나만 고르면 그 악기의 파트보)</span>${list}</div>
       <label class="field"><span>기타·베이스 표시</span><select name="mode">
         <option value="both">오선 + TAB</option><option value="tab">TAB만</option><option value="score">오선만</option><option value="keep">트랙 설정 그대로</option></select></label>
-      <label class="check"><input type="checkbox" name="each"> 고른 트랙을 한 장씩 따로 인쇄 (트랙마다 인쇄 창이 뜹니다)</label>
-      <p class="note">인쇄 창에서 프린터를 <b>Microsoft Print to PDF</b>로 고르면 PDF 파일로 저장됩니다.</p>`,
-      '인쇄',
+      ${
+        image
+          ? `<label class="check"><input type="checkbox" name="each"> 고른 트랙을 따로따로 (트랙마다 그림 파일)</label>
+      <p class="note">쪽마다 그림 파일 하나씩 저장됩니다. 브라우저가 '여러 파일 내려받기'를 물으면 허용해 주세요.</p>`
+          : `<label class="check"><input type="checkbox" name="each"> 고른 트랙을 한 장씩 따로 인쇄 (트랙마다 인쇄 창이 뜹니다)</label>
+      <p class="note">인쇄 창에서 프린터를 <b>PDF로 저장</b>(윈도우: Microsoft Print to PDF)으로 고르면 PDF 파일로 저장됩니다.</p>`
+      }`,
+      image ? '저장' : '인쇄',
     );
     if (!r) return;
     const idx = r.getAll('t').map(Number);
@@ -1889,6 +2563,32 @@ export class App {
     // 긴 제목(유튜브 영상 제목 등)은 A4 폭을 넘어 양옆이 잘리므로 글자를 줄인다 (대략 글자 폭 = 크기 × 0.6)
     const fit = Math.floor(700 / printScale / (Math.max(1, copy.title.length) * 0.6));
     if (fit < titleFont.size) res.titleFont = titleFont.withSize(Math.max(12, fit));
+    if (image) {
+      try {
+        const base = this.doc.fileName.replace(/\.[^.]+$/, '');
+        let saved = 0;
+        for (const g of groups) {
+          const part = groups.length > 1 ? ` - ${copy.tracks[g[0]].name}` : '';
+          if (groups.length > 1) copy.title = `${score.title}${part}`;
+          // 그리는 동안(긴 곡은 몇 초) 화면이 멈추므로 알림을 먼저 보이게
+          toast('그림을 만드는 중… 긴 곡은 몇 초 걸려요', 8000);
+          await new Promise((r) => setTimeout(r, 60));
+          // 그림 폭(1000px)이 A4 인쇄 폭보다 넓어 같은 비율로 조금 크게
+          const pages =renderImagePages(this.settings, copy, g, printScale * 1.3);
+          for (const [i, page] of pages.entries()) {
+            const name = `${base}${part}${pages.length > 1 ? ` (${i + 1})` : ''}.png`;
+            if (await saveFile(name, await canvasToPng(page), 'png')) saved++;
+            else if (isDesktop()) return; // exe에서 저장 창을 취소하면 나머지도 그만
+          }
+        }
+        if (saved) toast(`그림 ${saved}장을 저장했습니다.`);
+      } catch (e) {
+        await info('그림으로 저장', `<p>그림을 만들지 못했습니다: ${esc((e as Error).message ?? String(e))}</p>`);
+      } finally {
+        res.titleFont = titleFont;
+      }
+      return;
+    }
     document.body.classList.add('printing');
     this.settings.core.enableLazyLoading = false;
     this.settings.display.scale = printScale;
@@ -1985,6 +2685,7 @@ export class App {
       ['P / X / V / I', '팜뮤트 / 데드노트 / 비브라토 / 렛링'],
       ['N / W / T', '하모닉스 / 빗금(같은 화음 다시 치기) / 스타카토'],
       [DRUM_KIT.map((d) => d.key).join(' '), '드럼: ' + DRUM_KIT.map((d) => d.name).join(', ')],
+      ['펜 (✎ 필기)', '오선에 음표·4분쉼표, TAB에 프렛 숫자 · 음표 위를 긁어 지우기 · 손가락으로 스크롤'],
       ['Space', '재생 / 멈춤 (커서 위치부터)'],
       ['Ctrl + Z / Y', '실행 취소 / 다시 실행'],
       ['Ctrl + S', '저장'],
@@ -2007,28 +2708,78 @@ export class App {
   // ---------- 입력 도구 막대 ----------
 
   private buildPalette() {
-    $('palette').addEventListener('click', async (e) => {
+    const palette = $('palette');
+    const tooltip = $('paletteTooltip');
+    let tipTimer = 0;
+    const hideTip = () => {
+      clearTimeout(tipTimer);
+      tooltip.hidden = true;
+    };
+    const showTip = (b: HTMLButtonElement) => {
+      if (!b.dataset.label || !window.matchMedia('(max-width: 760px)').matches) return;
+      hideTip();
+      tooltip.textContent = b.dataset.label;
+      tooltip.hidden = false;
+      const r = b.getBoundingClientRect();
+      tooltip.style.left = `${Math.max(8, Math.min(r.left, innerWidth - tooltip.offsetWidth - 8))}px`;
+      tooltip.style.top = `${r.bottom + 6}px`;
+      tipTimer = window.setTimeout(hideTip, 1800);
+    };
+    palette.addEventListener('pointerover', (e) => {
+      const b = (e.target as HTMLElement).closest('button[data-label]');
+      if (e.pointerType !== 'touch' && b instanceof HTMLButtonElement && !b.contains(e.relatedTarget as Node | null)) showTip(b);
+    });
+    palette.addEventListener('focusin', (e) => {
+      if (e.target instanceof HTMLButtonElement && e.target.matches(':focus-visible')) showTip(e.target);
+    });
+    palette.addEventListener('pointerleave', (e) => { if (e.pointerType !== 'touch') hideTip(); });
+    document.addEventListener('pointerdown', (e) => {
+      if (e.target instanceof Node && !palette.contains(e.target)) {
+        this.closePaletteMenu();
+        hideTip();
+      }
+    }, true);
+    palette.addEventListener('click', async (e) => {
       const b = (e.target as HTMLElement).closest('button');
       if (!b) return;
+      // 마우스·펜으로 누른 단추는 포커스를 놓는다: 그래야 Space가 단추를 다시 누르지 않고 재생된다 (키보드로 누르면 detail=0이라 그대로)
+      if (e.detail > 0) b.blur();
+      if (!(e instanceof PointerEvent) || e.pointerType === 'touch') showTip(b);
       const c = this.cursor;
-      if (b.dataset.dur) return this.setInputDuration(Number(b.dataset.dur) as model.Duration);
+      if (b.id === 'inkBtn') return this.cmd('ink');
+      if (b.dataset.tool) {
+        const tool = b.dataset.tool as ScoreTool;
+        if (tool === this.scoreTool && (tool === 'note' || tool === 'rest')) return this.togglePaletteMenu('duration', b);
+        return this.setScoreTool(tool === 'erase' && tool === this.scoreTool ? 'select' : tool);
+      }
+      if (b.dataset.menu) return this.togglePaletteMenu(b.dataset.menu, b);
+      this.closePaletteMenu(false, true);
+      if (b.dataset.dur) {
+        if (this.scoreTool !== 'rest') this.setScoreTool('note');
+        return this.setInputDuration(Number(b.dataset.dur) as model.Duration);
+      }
       if (b.dataset.tech) return this.toggleTech(b.dataset.tech as ed.Technique, '기법');
       if (b.dataset.dyn) {
         const v = Number(b.dataset.dyn) as model.DynamicValue;
         const n = this.doc.commit('셈여림', (s) => ed.setDynamics(s, c, v));
         return toast(`여기부터 ${ed.DYNAMICS.find((d) => d.value === v)?.label} (박자 ${n}개, 다음 셈여림 표시 앞까지)`);
       }
+      if (b.dataset.kit === 'auto') {
+        this.toolDrum = null;
+        return this.updatePalette();
+      }
       if (b.dataset.kit) {
         const kit = Number(b.dataset.kit);
+        if (this.scoreTool === 'note') {
+          this.toolDrum = kit;
+          return this.updatePalette();
+        }
         return this.doc.commit(DRUM_KIT[kit].name, (s) => ed.toggleDrum(s, c, kit, this.inputDuration));
       }
       switch (b.dataset.act) {
         case 'dot':
-          return this.doc.commit('점음표', (s) => ed.toggleDot(s, c));
         case 'triplet':
-          return this.doc.commit('셋잇단음표', (s) => ed.toggleTriplet(s, c));
-        case 'rest':
-          return this.doc.commit('쉼표', (s) => ed.makeRest(s, c));
+          return this.toggleRhythmModifier(b.dataset.act);
         case 'insert':
           return this.doc.commit('박자 넣기', (s) => ed.insertBeatBefore(s, c));
         case 'delbeat':
@@ -2042,29 +2793,88 @@ export class App {
     this.updatePalette();
   }
 
-  /** 팔레트: 공통(길이·점·셋잇단·쉼표) + 지금 편집하는 악기의 기법만 + 글자·박자 */
+  private toggleRhythmModifier(modifier: 'dot' | 'triplet') {
+    if (this.scoreTool === 'note' || this.scoreTool === 'rest') {
+      if (modifier === 'dot') this.toolDot = !this.toolDot;
+      else this.toolTriplet = !this.toolTriplet;
+      return this.updatePalette();
+    }
+    const c = this.cursor;
+    if (modifier === 'dot') this.doc.commit('점음표', (s) => ed.toggleDot(s, c));
+    else this.doc.commit('셋잇단음표', (s) => ed.toggleTriplet(s, c));
+  }
+
+  private setScoreTool(tool: ScoreTool, stopInk = true) {
+    if (stopInk) this.ink.setEnabled(false);
+    this.closePaletteMenu();
+    this.scoreTool = tool;
+    if (tool === 'note' || tool === 'rest') this.inputDuration = this.toolDuration;
+    document.querySelector<HTMLElement>('.score-wrap')!.dataset.scoreTool = tool;
+    $('entryGuide').hidden = true;
+    this.updatePalette();
+  }
+
+  private closePaletteMenu(focus = false, restoreWhenInside = false) {
+    const menu = $('palette').querySelector<HTMLElement>('.tool-menu:not([hidden])');
+    if (!menu) return false;
+    if (focus || (restoreWhenInside && menu.contains(document.activeElement))) {
+      $('palette').querySelector<HTMLElement>('[aria-expanded="true"]')?.focus();
+    }
+    menu.hidden = true;
+    $('palette').querySelectorAll('[aria-expanded="true"]').forEach((b) => b.setAttribute('aria-expanded', 'false'));
+    return true;
+  }
+
+  private togglePaletteMenu(id: string, button: HTMLButtonElement) {
+    const isOpen = button.getAttribute('aria-expanded') === 'true';
+    this.closePaletteMenu();
+    if (isOpen) return;
+    const menu = $(`tools-${id}`);
+    menu.hidden = false;
+    button.setAttribute('aria-expanded', 'true');
+    const rect = button.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - menuRect.width - 8))}px`;
+    menu.style.top = `${rect.bottom + 5}px`;
+  }
+
   private renderPalette(kind: Kind) {
-    const durs = ed.DURATIONS.map((d) => `<button data-dur="${d.value}" title="${d.label}">${durGlyph(d.value)}</button>`).join('');
-    const label = { stringed: '기타·베이스', keys: '키보드·보컬', drums: '드럼' }[kind];
-    const techs = ed
-      .techniquesFor(kind)
-      .map((t) => `<button data-tech="${t.id}" title="${t.label}${t.key ? ` (${t.key})` : ''}">${t.label}</button>`)
-      .join('');
-    const kit =
-      kind === 'drums'
-        ? `<span class="sep"></span><span class="group"><span class="label">소리</span>${DRUM_KIT.map((d, i) => `<button data-kit="${i}" title="${esc(d.name)} (${d.key})">${esc(d.name)}</button>`).join('')}</span>`
-        : '';
-    $('palette').innerHTML = `<span class="group"><span class="label">길이</span>${durs}
-        <button data-act="dot" title="점음표 (.)">점</button><button data-act="triplet" title="셋잇단음표 (/)">셋잇단</button>
-        <button data-act="rest" title="쉼표 (R)">쉼표</button></span>
-      ${kit}
-      <span class="sep"></span><span class="group"><span class="kind-label">${label}</span>${techs}</span>
-      <span class="sep"></span><span class="group"><span class="label">셈여림</span>${ed.DYNAMICS.map((d) => `<button data-dyn="${d.value}" class="dyn" title="커서 박자부터 ${d.label} (다음 셈여림 표시 앞까지)">${d.label}</button>`).join('')}</span>
-      <span class="sep"></span><span class="group">
-        ${kind !== 'drums' ? '<button data-act="chord" title="코드 이름 넣기 (악보의 코드 글자를 눌러도 됨)">코드</button>' : ''}
-        <button data-act="lyric" title="가사 넣기: Space·Tab으로 다음 음표 (악보의 가사 글자를 눌러도 됨)">가사</button>
-        <button data-act="insert" title="앞에 박자 넣기 (Insert)">박자 넣기</button>
-        <button data-act="delbeat" title="박자 지우기 (Ctrl+Delete)">박자 지우기</button></span>`;
+    const iconLabel = (icon: string, label: string, music = false) =>
+      `<span class="tool-icon${music ? ' music-glyph' : ''}" aria-hidden="true">${icon}</span><span class="tool-name">${label}</span>`;
+    const button = (attributes: string, label: string, icon: string, music = false, arrow = false) =>
+      `<button ${attributes} aria-label="${label}" data-label="${label}">${iconLabel(icon, label, music)}${arrow ? ' <span class="tool-arrow" aria-hidden="true">▾</span>' : ''}</button>`;
+    const panel = (id: string, label: string, items: string) =>
+      `<div class="tool-menu" id="tools-${id}" role="group" aria-label="${label}" hidden>${items}</div>`;
+    const menu = (id: string, label: string, icon: string, items: string) =>
+      `${button(`data-menu="${id}" aria-expanded="false" aria-controls="tools-${id}"`, label, icon, false, true)}${panel(id, label, items)}`;
+    const duration = ed.DURATIONS.map((d) =>
+      `<button data-dur="${d.value}" aria-label="${d.label}"><span class="music-glyph" data-duration-glyph>${durationGlyph(d.value, false)}</span> <span data-duration-name>${d.label}</span></button>`).join('');
+    const techniques = ed.techniquesFor(kind)
+      .map((t) => `<button data-tech="${t.id}" title="${t.label}${t.key ? ` (${t.key})` : ''}">${t.label}</button>`).join('');
+    const dynamics = ed.DYNAMICS.map((d) => `<button data-dyn="${d.value}" class="dyn" title="커서 박자부터 적용">${d.label}</button>`).join('');
+    const drums = '<button data-kit="auto">오선 위치로 선택</button>' + DRUM_KIT.map((d, i) =>
+      `<button data-kit="${i}" title="${esc(d.name)} (${d.key})">${esc(d.name)}</button>`).join('');
+    const techniqueTitle = { drums: '드럼 주법', keys: '키보드·보컬 주법', stringed: '기타·베이스 주법' }[kind];
+    $('paletteTooltip').hidden = true;
+    $('palette').innerHTML = `<div class="group tool-primary" role="group" aria-label="악보 입력">
+        ${button('data-tool="select"', '선택', '↖')}
+        ${button('data-tool="note" aria-expanded="false" aria-controls="tools-duration"', '음표', durationGlyph(this.toolDuration, false), true, true)}
+        ${button('data-tool="rest" aria-expanded="false" aria-controls="tools-duration"', '쉼표', durationGlyph(this.toolDuration, true), true, true)}
+        ${button('data-tool="erase"', '지우개', '⌫')}
+        ${button('id="inkBtn"', '필기', '✎')}
+        ${panel('duration', '입력 길이', duration)}
+      </div>
+      <div class="group tool-secondary" role="group" aria-label="악보 편집">
+        ${button('data-act="dot"', '점', '·')}
+        ${button('data-act="triplet"', '셋잇단', '³♫')}
+        ${kind !== 'drums' ? button('data-act="chord"', '코드', 'C⁷') : menu('drums', '드럼 소리', '◉', drums)}
+        ${techniques ? menu('tech', techniqueTitle, 'ƒ', techniques) : ''}
+        ${menu('dynamics', '셈여림', '𝆑', dynamics)}
+        ${menu('edit', '더 보기', '⋯', `<button data-act="lyric">가사</button>
+          <button data-act="insert" title="앞에 박자 넣기 (Insert)">박자 넣기</button>
+          <button data-act="delbeat" title="박자 지우기 (Ctrl+Delete)">박자 지우기</button>`)}
+      </div>
+      <span id="toolHint" class="tool-hint" aria-live="polite"></span>`;
   }
 
   /** 커서 마디부터 박자표·빠르기 바꾸기 */
@@ -2160,15 +2970,52 @@ export class App {
       this.paletteKind = kind;
     }
     const beat = this.doc.beatAt(this.cursor);
-    const dur = beat.isEmpty ? this.inputDuration : beat.duration;
-    document.querySelectorAll<HTMLButtonElement>('[data-dur]').forEach((b) => b.classList.toggle('on', Number(b.dataset.dur) === dur));
-    document.querySelector('[data-act="dot"]')?.classList.toggle('on', beat.dots > 0);
-    document.querySelector('[data-act="triplet"]')?.classList.toggle('on', beat.hasTuplet);
+    const entering = this.scoreTool === 'note' || this.scoreTool === 'rest';
+    const dur = entering ? this.toolDuration : beat.isEmpty ? this.inputDuration : beat.duration;
+    const palette = $('palette');
+    const inkOn = this.ink?.enabled === true;
+    $('inkBtn').classList.toggle('on', inkOn);
+    $('inkBtn').setAttribute('aria-pressed', String(inkOn));
+    for (const tool of ['note', 'rest'] as const) {
+      palette.querySelector(`[data-tool="${tool}"] .tool-icon`)!.textContent = durationGlyph(this.toolDuration, tool === 'rest');
+    }
+    palette.querySelectorAll<HTMLButtonElement>('[data-dur]').forEach((b) => {
+      b.querySelector('[data-duration-glyph]')!.textContent = durationGlyph(Number(b.dataset.dur), this.scoreTool === 'rest');
+      const label = ed.DURATIONS.find((d) => d.value === Number(b.dataset.dur))!.label;
+      const name = this.scoreTool === 'rest' ? label.replace('음표', '쉼표') : label;
+      b.setAttribute('aria-label', name);
+      b.querySelector('[data-duration-name]')!.textContent = name;
+    });
+    $('toolHint').textContent = entering
+      ? `${ed.DURATIONS.find((d) => d.value === dur)?.label ?? ''} · 악보를 눌러 입력`
+      : this.scoreTool === 'erase' ? '음표 머리나 쉼표를 눌러 지우기' : '';
+    $('palette').querySelectorAll<HTMLButtonElement>('[data-tool], [data-dur]').forEach((b) => {
+      const pressed = b.dataset.tool ? b.dataset.tool === this.scoreTool : Number(b.dataset.dur) === dur;
+      b.classList.toggle('on', pressed);
+      b.setAttribute('aria-pressed', String(pressed));
+    });
+    document.querySelector('[data-act="dot"]')?.classList.toggle('on', entering ? this.toolDot : beat.dots > 0);
+    document.querySelector('[data-act="triplet"]')?.classList.toggle('on', entering ? this.toolTriplet : beat.hasTuplet);
     const note = ed.noteAtCursor(beat, this.cursor) ?? beat.notes[0] ?? null;
     const shown = tr.hasDynamics(this.doc.score);
     document.querySelectorAll<HTMLButtonElement>('[data-dyn]').forEach((b) => b.classList.toggle('on', shown && beat.notes.length > 0 && Number(b.dataset.dyn) === beat.dynamics));
     for (const t of ed.techniquesFor(kind))
       document.querySelector<HTMLButtonElement>(`[data-tech="${t.id}"]`)?.classList.toggle('on', !!note && ed.techniqueOn(note, t.id));
+    // 드럼: 지금 박자에 들어 있는 파츠(킥·스네어·하이햇…)의 입력 단추에 불을 켠다. 마우스로 누른 음표의 파츠는 테두리를 더
+    if (kind === 'drums') {
+      const track = this.doc.score.tracks[this.cursor.track];
+      const kits = new Map<number, boolean>();
+      for (const n of beat.notes) {
+        const a = track.percussionArticulations[n.percussionArticulation];
+        const k = a ? kitForArticulation(a) : -1;
+        if (k >= 0) kits.set(k, kits.get(k) || this.drumPick === n.index);
+      }
+      document.querySelectorAll<HTMLButtonElement>('[data-kit]').forEach((b) => {
+        const k = Number(b.dataset.kit);
+        b.classList.toggle('on', kits.has(k));
+        b.classList.toggle('picked', entering ? this.toolDrum === k || (b.dataset.kit === 'auto' && this.toolDrum === null) : kits.get(k) === true);
+      });
+    }
   }
 
   // ---------- 트랙 패널 ----------
@@ -2312,9 +3159,11 @@ export class App {
 
   private async onTrackAction(e: Event, type: 'click' | 'dbl' | 'change' | 'input') {
     const el = e.target as HTMLElement;
-    const act = el.dataset.tact;
+    const control = el.closest<HTMLElement>('[data-tact]');
     const box = el.closest<HTMLElement>('[data-track]');
-    if (!act || !box) return;
+    if (!box) return;
+    const act = control?.dataset.tact ?? (type === 'click' && !el.closest('button, input, select') ? 'focus' : undefined);
+    if (!act) return;
     const i = Number(box.dataset.track);
     const doc = this.doc;
     const track = doc.score.tracks[i];
@@ -2334,7 +3183,10 @@ export class App {
         if (act === 'visible') {
           if ((el as HTMLInputElement).checked) this.visible.add(i);
           else if (this.visible.size > 1) this.visible.delete(i);
-          if (!this.visible.has(this.cursor.track)) this.cursor = { ...this.cursor, track: [...this.visible][0], staff: 0 };
+          if (!this.visible.has(this.cursor.track)) {
+            this.toolDrum = null;
+            this.cursor = { ...this.cursor, track: [...this.visible][0], staff: 0 };
+          }
           return this.render();
         }
         if (act === 'notation') {
@@ -2541,6 +3393,7 @@ export class App {
         <label>♩= <input id="bpm" type="number" min="20" max="400" step="1"></label>
         <button id="bpmUp" title="5 빠르게">+</button>
         <button id="bpmReset" class="link" hidden></button>
+        <button id="bpmSave" class="link" hidden title="지금 재생 빠르기를 악보 빠르기로 적습니다 (저장하면 파일에 남음)">악보에 적기</button>
       </span>
       <button id="loopBtn" title="악보에서 마우스로 구간을 끌어서 고른 뒤 누르세요">구간 반복</button>
       <button id="metroBtn">메트로놈</button>
@@ -2555,6 +3408,7 @@ export class App {
     $('bpmDown').onclick = () => this.setBpm(this.currentBpm() - 5);
     $('bpmUp').onclick = () => this.setBpm(this.currentBpm() + 5);
     $('bpmReset').onclick = () => this.setBpm(this.doc.score.tempo);
+    $('bpmSave').onclick = () => this.writeBpmToScore();
     $('loopBtn').onclick = () => {
       this.api.isLooping = !this.api.isLooping;
       $('loopBtn').classList.toggle('on', this.api.isLooping);
@@ -2599,6 +3453,26 @@ export class App {
     const reset = $('bpmReset');
     reset.hidden = this.currentBpm() === base;
     reset.textContent = `원래 ♩=${base}`;
+    $('bpmSave').hidden = reset.hidden;
+  }
+
+  /**
+   * 재생 막대의 ♩=는 재생 빠르기만 바꾼다(악보는 그대로). 그 빠르기를 악보에 적는다:
+   * 곡 중간에 빠르기가 바뀌면 같은 비율로 모두 바꾸고, 재생 빠르기는 1배로 되돌린다 (실행 취소 가능, 저장하면 파일·서버에 남음)
+   */
+  private writeBpmToScore() {
+    const base = this.doc.score.tempo || 120;
+    const target = this.currentBpm();
+    if (target === base) return;
+    const ratio = target / base;
+    this.doc.commit('악보 빠르기', (s) => {
+      for (const mb of s.masterBars) for (const a of mb.tempoAutomations) a.value = Math.max(20, Math.min(400, Math.round(a.value * ratio)));
+      // 곡 빠르기(score.tempo)는 첫 마디 빠르기 표시에서 정해진다
+      if (ed.tempoAt(s, 0) === null) ed.setTempoAt(s, 0, target);
+    });
+    this.api.playbackSpeed = 1;
+    this.updateBpm();
+    toast(`악보 빠르기를 ♩=${target}(으)로 적었습니다. 저장(Ctrl+S)하면 남습니다.`, 4000);
   }
 
   /**
@@ -2685,23 +3559,53 @@ export class App {
   /** Claude 연결 안내: Claude 데스크톱은 .mcpb 한 번에 설치, Claude Code는 명령 한 줄 */
   private async claudeDialog() {
     if (!isDesktop()) return void (await info('Claude 연결하기', '<p>Claude 연결은 exe 프로그램에서만 됩니다.</p>'));
-    const m = await window.pywebview!.api.mcp_info();
-    const cmd = m.server ? `claude mcp add band-score -- node "${m.server}"` : '';
+    const api = window.pywebview!.api;
+    const m = await api.mcp_info();
+    const st = await api.claude_status().catch(() => ({ installed: false, current: false }));
+    // Claude Code도 Node 없이 이 exe를 MCP 서버로 쓴다
+    const q = (x: string) => (/\s/.test(x) ? `"${x}"` : x);
+    const cmd = m.command ? `claude mcp add band-score -- ${[m.command.command, ...m.command.args].map(q).join(' ')}` : '';
+    const state = st.installed
+      ? st.current
+        ? '<p class="note">✔ Claude 데스크톱에 이미 연결돼 있습니다.</p>'
+        : '<p class="note">Claude 데스크톱에 예전 위치의 편집기가 연결돼 있습니다. 이 편집기로 바꾸려면 <b>다시 연결</b>을 누르세요.</p>'
+      : '';
     const r = await choose(
       'Claude(AI) 연결하기',
       `<p>연결하면 Claude에게 <b>"열린 악보를 원본과 비교해서 61마디부터 고쳐 줘"</b>처럼 부탁할 수 있습니다.
        Claude가 원본 그림을 보고 마디를 읽고 고치며, 바뀐 내용은 이 창에 바로 보이고 <b>Ctrl+Z</b>로 되돌릴 수 있습니다.</p>
-       <p><b>Claude 데스크톱 앱</b>: 아래 <b>설치</b>를 누르면 Claude 데스크톱의 설치 창이 뜹니다(한 번만). 그 뒤 Claude 데스크톱에서 새 대화를 시작하세요.</p>
-       ${cmd ? `<p><b>Claude Code</b>(Node 필요): 터미널에서 한 번 실행<br><code style="user-select:all;word-break:break-all">${esc(cmd)}</code></p>` : ''}
-       <p class="note">이 편집기가 켜져 있어야 합니다(꺼져 있으면 Claude가 켭니다). Claude가 원본을 볼 때 악보 그림이 Claude(Anthropic)로 전송됩니다.</p>`,
+       <p><b>Claude 데스크톱 앱</b>: 아래 <b>Claude 데스크톱에 연결</b>을 누른 뒤, Claude 데스크톱을 <b>완전히 종료했다가 다시 켜면</b> 끝입니다(한 번만).
+       종료는 화면 오른쪽 아래 작업 표시줄의 Claude 아이콘을 오른쪽 클릭 ▸ 종료(Quit).</p>
+       ${state}
+       ${m.mcpb ? `<p class="note">다른 방법: <b>설치 파일로</b>를 누르면 Claude 데스크톱 확장 설치 창이 뜹니다. 윈도우가 <b>'이 파일을 열 앱 선택'</b>을 물으면 목록에서 <b>Claude</b>를 고르세요(안 보이면 '더 많은 앱'). 두 방법 중 <b>하나만</b> 쓰세요(둘 다 하면 같은 도구가 두 번 보임).</p>` : ''}
+       ${cmd ? `<p class="note">Claude Code(터미널)를 쓰면: <code style="user-select:all;word-break:break-all">${esc(cmd)}</code></p>` : ''}
+       <p class="note">Claude가 쓸 때 이 편집기가 꺼져 있으면 자동으로 켭니다. Claude가 원본을 볼 때 악보 그림이 Claude(Anthropic)로 전송됩니다.</p>`,
       [
         { value: 'close', label: '닫기' },
         ...(cmd ? [{ value: 'copy', label: 'Claude Code 명령 복사' }] : []),
-        ...(m.mcpb ? [{ value: 'install', label: '설치 (Claude 데스크톱)', primary: true }] : []),
+        ...(m.mcpb ? [{ value: 'mcpb', label: '설치 파일로' }] : []),
+        { value: 'install', label: st.installed && st.current ? '다시 연결' : 'Claude 데스크톱에 연결', primary: true },
       ],
     );
-    if (r === 'install' && m.mcpb) {
-      if (!(await window.pywebview!.api.open_path_in_shell(m.mcpb))) toast('설치 파일을 열지 못했습니다. Claude 데스크톱이 설치돼 있는지 확인하세요.', 5000);
+    if (r === 'install') {
+      const res = await api.install_claude();
+      if (!res.ok) return void (await info('Claude 연결하기', `<p>${esc(res.error ?? '연결하지 못했습니다.')}</p>`));
+      await info(
+        'Claude 데스크톱에 연결했습니다',
+        `<p>이제 Claude 데스크톱을 <b>완전히 종료했다가 다시 켜세요</b>${res.claudeRunning ? ' (지금 켜져 있어서, 다시 켜야 연결됩니다)' : ''}.</p>
+         <p>작업 표시줄 오른쪽 아래의 Claude 아이콘을 오른쪽 클릭 ▸ <b>종료(Quit)</b> → Claude를 다시 실행.
+         창의 X 버튼만 누르면 꺼지지 않고 숨기만 하니 꼭 종료를 고르세요.</p>
+         <p>새 대화의 입력 칸 아래 <b>도구(망치·슬라이더) 메뉴</b>에 <b>band-score</b>가 보이면 연결된 것입니다.
+         "편집기에 열린 악보 상태 알려 줘"라고 말해 보세요.</p>`,
+      );
+    } else if (r === 'mcpb' && m.mcpb) {
+      if (!(await api.open_path_in_shell(m.mcpb))) return void toast('설치 파일을 열지 못했습니다.', 5000);
+      await info(
+        '설치 파일을 열었습니다',
+        `<p>윈도우가 <b>'이 파일을 열 앱 선택'</b> 창을 띄우면 목록에서 <b>Claude</b>를 고르고 확인을 누르세요.
+         ('항상 이 앱을 사용' 체크는 해도 되고 안 해도 됩니다.) 목록에 없으면 '더 많은 앱'을 누르세요.</p>
+         <p>Claude 데스크톱에 확장 설치 창이 뜨면 <b>설치</b>를 누르면 끝입니다.</p>`,
+      );
     } else if (r === 'copy') {
       await navigator.clipboard.writeText(cmd).then(
         () => toast('복사했습니다. 터미널에 붙여 넣어 실행하세요.'),
@@ -2770,14 +3674,17 @@ export class App {
           return `- 트랙 ${t.index}: "${t.name}" ${kind}${t.staves.length > 1 ? `, 오선 ${t.staves.length}개` : ''}${bad.length ? `, 박자 안 맞는 마디: ${bad.map((b) => b + 1).join(' ')}` : ''}`;
         });
         let source = '없음';
-        if (this.source) {
+        const cur = this.sourceFor();
+        if (cur) {
           let pages = '?';
           try {
-            pages = String((await pageImage(this.source.path, -1)).pages);
+            pages = String((await pageImage(cur.path, -1)).pages);
           } catch {
             /* 원본 파일이 없어졌을 수 있다 */
           }
-          source = `${this.source.name} (${pages}쪽${this.source.systems.length ? `, 단 ${this.source.systems.length}개의 마디 위치를 앎 → original_image에 bar로` : ', 마디 위치 모름 → original_image에 page로 쪽 지정'})`;
+          source = `${cur.name} (${pages}쪽${cur.systems.length ? `, 단 ${cur.systems.length}개의 마디 위치를 앎 → original_image에 bar로` : ', 마디 위치 모름 → original_image에 page로 쪽 지정'})`;
+          if (this.trackSources.size)
+            source += `\n  트랙마다 원본이 다름 (original_image는 편집기 커서가 있는 트랙의 원본): ${[...this.trackSources].map(([k, v]) => `트랙 ${k} → ${v.name}`).join(', ')}`;
         }
         return {
           text: [
@@ -2825,8 +3732,8 @@ export class App {
         return { text: `고쳤습니다 (편집기에서 Ctrl+Z로 되돌릴 수 있음).\n${bars.map((b) => `# ${b + 1}마디: ${barHeader(score(), t, b)}`).join('\n')}` };
       }
       case 'original_image': {
-        if (!this.source) throw new Error('이 악보에는 원본(인식한 PDF·사진)이 연결돼 있지 않습니다. 편집기에서 "원본 보기"로 원본 파일을 고르게 사용자에게 부탁하세요.');
-        const src = this.source;
+        const src = this.sourceFor();
+        if (!src) throw new Error('이 악보에는 원본(인식한 PDF·사진)이 연결돼 있지 않습니다. 편집기에서 "원본 보기"로 원본 파일을 고르게 사용자에게 부탁하세요.');
         if (args.page !== undefined) {
           const img = await pageImage(src.path, Number(args.page) - 1);
           return { text: `원본 ${Number(args.page)}/${img.pages}쪽`, images: [{ data: img.data, mime: img.mime }] };
@@ -2895,7 +3802,7 @@ export class App {
         const path = args.path ? String(args.path) : this.docPath;
         if (!path) throw new Error('아직 저장한 적 없는 악보입니다. path(저장할 .bscore 전체 경로)를 주세요.');
         if (!/\.bscore$/i.test(path)) throw new Error('save는 .bscore로만 저장합니다 (다른 형식은 사용자가 파일 ▸ 다른 이름으로 저장).');
-        const where = await saveTo(path, saveNative(this.doc.score, { source: this.source ?? undefined }));
+        const where = await saveTo(path, saveNative(this.doc.score, this.sourceMeta()));
         this.docPath = where;
         this.doc.fileName = where.split(/[\\/]/).pop()!;
         this.doc.dirty = false;
@@ -2933,7 +3840,8 @@ export class App {
             .join(', '),
       );
     } else parts.push(beat.isEmpty ? '빈 박자' : '쉼표');
-    if (c.note !== undefined && beat.notes[c.note]) parts.push(`<b>고른 음: ${pitchName(notePitch(beat.notes[c.note]))}</b> (↑↓ 이 음만, Tab 다음 음)`);
+    if (staff.isPercussion && this.drumPick !== null && beat.notes[this.drumPick]) parts.push(`<b>누른 음표: ${esc(drumName(track, beat.notes[this.drumPick].percussionArticulation))}</b>`);
+    else if (c.note !== undefined && beat.notes[c.note]) parts.push(`<b>고른 음: ${pitchName(notePitch(beat.notes[c.note]))}</b> (↑↓ 이 음만, Tab 다음 음)`);
     else if (!staff.isStringed && !staff.isPercussion && beat.notes.length > 1) parts.push('화음 전체 (음을 누르거나 Tab으로 하나만 고름)');
     const rep = ed.getBarRepeat(score, c.bar);
     const marks = [
@@ -2961,7 +3869,8 @@ function fromB64(b64: string): Uint8Array {
   return out;
 }
 
-function durGlyph(d: model.Duration): string {
-  return ({ 1: '𝅝', 2: '𝅗𝅥', 4: '♩', 8: '♪', 16: '𝅘𝅥𝅯', 32: '𝅘𝅥𝅰' } as Record<number, string>)[d] ?? String(d);
+function durationGlyph(d: model.Duration, rest: boolean): string {
+  const index = ed.DURATIONS.findIndex((entry) => entry.value === d);
+  const notes = [0xe1d2, 0xe1d3, 0xe1d5, 0xe1d7, 0xe1d9, 0xe1db];
+  return index < 0 ? '' : String.fromCodePoint(rest ? 0xe4e3 + index : notes[index]);
 }
-

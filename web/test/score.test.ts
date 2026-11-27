@@ -8,6 +8,7 @@ import * as ed from '../src/score/edit';
 import { dropRepeatedJumps, exportMusicXml, restoreJumpWords } from '../src/score/musicxml';
 import { drumName, normalizeDrumTrack, splitTicks } from '../src/score/drums';
 import { loadNative, saveNative } from '../src/score/native';
+import { cleanSource, mapSystems } from '../src/ui/source-view';
 import { dropFlagCrosses, loadRecognized, preprocessRecognizedXml } from '../src/score/omrfix';
 import { tidyRecognized } from '../src/score/tracks';
 
@@ -26,6 +27,42 @@ function signature(score: model.Score, ti: number, extra = 0): string {
 }
 
 const rebuilt = (s: model.Score) => tr.cloneScore(s, settings);
+
+describe('새 트랙: 보컬·멜로디', () => {
+  it('높은음자리표 오선 하나, TAB 없음, 음을 넣을 수 있다', () => {
+    const score = createTemplate({ title: 't', tempo: 100, bars: 2, numerator: 4, denominator: 4, key: 0, parts: ['vocal', 'guitar1'] }, settings);
+    expect(score.tracks.map((t) => t.name)).toEqual(['보컬', '기타 1']);
+    const vo = score.tracks[0];
+    expect(vo.staves).toHaveLength(1);
+    expect(vo.staves[0].isStringed).toBe(false);
+    expect(vo.staves[0].isPercussion).toBe(false);
+    expect(vo.staves[0].showStandardNotation).toBe(true);
+    expect(vo.staves[0].bars[0].clef).toBe(model.Clef.G2);
+    expect(vo.playbackInfo.program).toBe(73);
+    const c = { track: 0, staff: 0, voice: 0, bar: 0, beat: 0, string: 1 };
+    ed.setPitch(score, c, 67, model.Duration.Quarter, false);
+    expect(ed.beatAt(score, c).notes.map(notePitch)).toEqual([67]);
+  });
+});
+
+describe('코드 선택', () => {
+  it('코드 운지표를 지우면 참조가 끝난 운지표만 정리한다', () => {
+    const score = createDemo(settings);
+    const staff = score.tracks[0].staves[0];
+    const from = { track: 0, staff: 0, voice: 0, bar: 0, beat: 0, string: 1 };
+    const next = { ...from, beat: 1 };
+    const frets = [0, 1, 0, 2, 3, -1];
+    ed.setChordName(score, from, 'C', { frets });
+    ed.setChordName(score, next, 'C', { frets });
+    const id = ed.beatAt(score, next).chordId!;
+    expect(ed.beatAt(rebuilt(score), next).chord?.strings).toEqual(frets);
+    ed.setChordName(score, from, '', {});
+    expect(staff.hasChord(id)).toBe(true);
+    ed.setChordName(score, next, 'C', {});
+    expect(staff.hasChord(id)).toBe(false);
+    expect(ed.beatAt(score, next).chord?.showDiagram).toBe(false);
+  });
+});
 
 describe('조바꿈', () => {
   it('+2반음 하면 모든 음이 2씩 오르고 조표가 G→A', () => {
@@ -530,5 +567,57 @@ describe('파일 열기 뒤 편집', () => {
     ed.setFret(s, { ...c, bar: 1 }, 9, model.Duration.Whole);
     expect(ed.toggleTechnique(s, { ...c, bar: 1, string: 1 }, 'tie')).toBeUndefined();
     expect(s.tracks[0].staves[0].bars[1].voices[0].beats[0].notes[0].isTieDestination).toBe(true);
+  });
+});
+
+describe('긴 줄 나누기 (마디 너비 고르게)', () => {
+  it('끝쪽에 몰린 18마디 줄을 다른 줄 길이로 나누고, 고른 줄은 그대로 둔다', () => {
+    const s = createDemo(settings);
+    s.systemsLayout = [5, 4, 4, 4, 4, 4, 18];
+    s.tracks[0].systemsLayout = [5, 4, 4, 4, 4, 4, 18];
+    expect(tr.splitLongSystems(s)).toBe(true);
+    expect(s.systemsLayout).toEqual([5, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3]);
+    expect(s.systemsLayout.reduce((a, b) => a + b, 0)).toBe(43);
+    expect(s.tracks[0].systemsLayout).toEqual(s.systemsLayout);
+    expect(tr.splitLongSystems(s)).toBe(false);
+  });
+});
+
+describe('밴드 총보: 트랙마다 원본 파트 마디 대응', () => {
+  it('트랙이 어느 파트 파일에서 왔는지와 총보 마디 → 파트 마디를 알려 준다 (파트 순서가 섞여도)', () => {
+    const demo = createDemo(settings);
+    const bass = tr.extractTracks(demo, [1], settings);
+    const guitar = tr.extractTracks(demo, [0], settings);
+    // 베이스 파일을 먼저 넣어도 총보는 기타가 먼저(역할 순서). part는 넣은 순서 번호
+    const built = tr.assembleBand([{ score: bass, role: 'bass' }, { score: guitar, role: 'guitar' }], settings, '시험', undefined, { fold: false });
+    const names = built.score.tracks.map((t) => t.name);
+    const o = built.report.trackOrigins;
+    expect(o.length).toBe(names.length);
+    expect(o[names.indexOf('기타')].part).toBe(1);
+    expect(o[names.indexOf('베이스')].part).toBe(0);
+    for (const x of o) expect(x.bars).toEqual([...Array(built.score.masterBars.length).keys()]);
+  });
+
+  it('파트 원본의 단 위치를 총보 마디로 옮긴다 (떨어진 곳은 덩어리마다)', () => {
+    const origin = [0, 1, 2, 3, 0, 1, null, 4];
+    expect(mapSystems([[0, 0.1, 0.2, 0, 2], [0, 0.3, 0.4, 2, 3]], origin)).toEqual([
+      [0, 0.1, 0.2, 0, 2],
+      [0, 0.3, 0.4, 2, 2],
+      [0, 0.1, 0.2, 4, 2],
+      [0, 0.3, 0.4, 7, 1],
+    ]);
+  });
+
+  it('접은 악보 마디 → 펼친 악보 마디', () => {
+    expect(tr.foldedToUnfolded(10, [{ start: 2, length: 2, times: 3 }])).toEqual([0, 1, 2, 3, 8, 9]);
+  });
+});
+
+describe('저장된 원본 정보 검사', () => {
+  it('글자 하나뿐이거나 경로가 없는 원본은 버리고, 이름이 없으면 경로에서 만든다', () => {
+    expect(cleanSource('pdf-omr-vector')).toBeNull();
+    expect(cleanSource({ name: 'a.pdf' })).toBeNull();
+    expect(cleanSource({ path: 'C:\\a\\기타.pdf' })).toEqual({ path: 'C:\\a\\기타.pdf', name: '기타.pdf', systems: [] });
+    expect(cleanSource({ path: 'C:/b.pdf', name: 'b.pdf', systems: [[0, 0.1, 0.2, 0, 4], 'x'] })?.systems).toEqual([[0, 0.1, 0.2, 0, 4]]);
   });
 });

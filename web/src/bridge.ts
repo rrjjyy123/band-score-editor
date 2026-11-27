@@ -10,7 +10,7 @@ export interface OpenedFile {
 }
 
 export type FileKind = 'score' | 'pdf' | 'any';
-export type SaveKind = 'bscore' | 'gp' | 'musicxml' | 'mid';
+export type SaveKind = 'bscore' | 'gp' | 'musicxml' | 'mid' | 'png';
 
 interface RecognizeResult {
   name: string;
@@ -47,7 +47,9 @@ interface PyApi {
   mcp_wait(): Promise<unknown>;
   mcp_result(id: string, result: unknown): Promise<boolean>;
   page_image(path: string, page: number, y0: number, y1: number): Promise<{ data: string; mime: string; pages: number } | { error: string }>;
-  mcp_info(): Promise<{ mcpb: string | null; server: string | null; node: string | null }>;
+  mcp_info(): Promise<{ mcpb: string | null; server: string | null; node: string | null; command?: { command: string; args: string[] } }>;
+  claude_status(): Promise<{ installed: boolean; current: boolean }>;
+  install_claude(): Promise<{ ok: boolean; error?: string; paths?: string[]; claudeRunning?: boolean }>;
   open_path_in_shell(path: string): Promise<boolean>;
 }
 
@@ -58,6 +60,36 @@ declare global {
 }
 
 export const isDesktop = () => !!window.pywebview?.api;
+
+// ---------- 다른 웹앱에 끼워 쓸 때 (band-ensemble 웹 편집기) ----------
+// 그 웹앱이 App을 만들기 전에 setHost로 저장·자동 저장·처음 열 곡·재생 설정을 맡긴다. 없으면 exe/개발용 브라우저 그대로.
+
+export interface HostPlayer {
+  /** 사운드폰트 주소 (주면 이것 하나만 쓴다. 안 주면 FluidR3 + 피아노는 sonivox) */
+  soundFont?: string;
+  bufferTimeInMilliseconds?: number;
+  enableAnimatedBeatCursor?: boolean;
+}
+
+export interface Host {
+  /** 처음 열 악보 (자동 저장 되살리기를 묻고 나서 부른다) */
+  startup(): Promise<{ name: string; data: Uint8Array } | null>;
+  /** 악보를 열 때마다 (파일 이름) */
+  opened?(name: string): void;
+  /** .bscore 저장. 저장한 파일 이름을 돌려주고, 취소면 null */
+  saveScore(defaultName: string, data: Uint8Array, saveAs: boolean): Promise<string | null>;
+  onDirty?(dirty: boolean): void;
+  autosaveWrite(name: string, data: Uint8Array): Promise<void>;
+  autosaveRead(): Promise<{ name: string; data: Uint8Array; time: number } | null>;
+  autosaveClear(): Promise<void>;
+  player?: HostPlayer;
+}
+
+let host: Host | null = null;
+export function setHost(h: Host) {
+  host = h;
+}
+export const getHost = () => host;
 
 function toBase64(bytes: Uint8Array): string {
   let s = '';
@@ -213,6 +245,7 @@ export async function recognize(src: OpenedFile, onProgress: (stage: string, per
 const AUTOSAVE_KEY = 'band-score-autosave';
 
 export async function autosaveWrite(name: string, data: Uint8Array): Promise<void> {
+  if (host) return host.autosaveWrite(name, data);
   if (isDesktop()) {
     await window.pywebview!.api.autosave_write(name, toBase64(data));
     return;
@@ -225,6 +258,7 @@ export async function autosaveWrite(name: string, data: Uint8Array): Promise<voi
 }
 
 export async function autosaveRead(): Promise<{ name: string; data: Uint8Array; time: number } | null> {
+  if (host) return host.autosaveRead();
   if (isDesktop()) {
     const r = await window.pywebview!.api.autosave_read();
     return r ? { name: r.name, data: fromBase64(r.data), time: r.time } : null;
@@ -240,6 +274,7 @@ export async function autosaveRead(): Promise<{ name: string; data: Uint8Array; 
 }
 
 export async function autosaveClear(): Promise<void> {
+  if (host) return host.autosaveClear();
   if (isDesktop()) await window.pywebview!.api.autosave_clear();
   else
     try {
@@ -260,6 +295,7 @@ export async function pageImages(path: string): Promise<string[] | null> {
 
 /** 저장 안 한 변경이 있는지 exe에 알린다 (창을 닫을 때 물어보게) */
 export function tellDirty(dirty: boolean) {
+  host?.onDirty?.(dirty);
   if (isDesktop()) window.pywebview!.api.set_dirty(dirty).catch(() => {});
 }
 

@@ -26,6 +26,8 @@ const reviver = (_k: string, v: unknown) =>
 export interface NativeMeta {
   /** 인식한 원본 파일과 단 위치: 다시 열어도 원본 보기를 쓸 수 있게 */
   source?: { path: string; name: string; systems: [number, number, number, number, number][] };
+  /** 트랙마다 따로 정한 원본 (밴드 총보처럼 악기마다 PDF가 다를 때). 키는 트랙 번호 */
+  sources?: Record<string, { path: string; name: string; systems: [number, number, number, number, number][] }>;
 }
 
 export function saveNative(score: model.Score, meta?: NativeMeta): Uint8Array {

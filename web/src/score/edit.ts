@@ -65,8 +65,8 @@ export function setPitch(score: Score, c: Cursor, pitch: number, duration: model
   const note = new model.Note();
   if (staff.isStringed) {
     const used = new Set(beat.notes.map((n) => n.string));
-    const pos = bestFretFor(staff, pitch, used.has(c.string) ? undefined : c.string);
-    if (!pos || used.has(pos.string)) return null;
+    const pos = bestFretFor(staff, pitch, c.string, used);
+    if (!pos) return null;
     note.string = pos.string;
     note.fret = pos.fret;
   } else {
@@ -614,22 +614,31 @@ export function setBarRepeat(score: Score, bar: number, r: BarRepeat) {
   } else mb.section = null;
 }
 
-export function setChordName(score: Score, c: Cursor, name: string) {
+export function setChordName(score: Score, c: Cursor, name: string, display?: { frets?: number[] }) {
   const beat = beatAt(score, c);
   const staff = staffOf(beat);
-  if (!name.trim()) {
-    beat.chordId = null;
-    return;
+  const prior = beat.chordId;
+  const frets = display?.frets;
+  const id = display ? `chord-picker-${name}:${frets?.join(',') ?? 'symbol'}` : `chord-${name}`;
+  if (name.trim()) {
+    if (!staff.hasChord(id)) {
+      const chord = new model.Chord();
+      chord.name = name;
+      chord.showDiagram = !!frets;
+      chord.showFingering = false;
+      if (frets) {
+        chord.strings = [...frets];
+        const pressed = frets.filter((f) => f > 0);
+        chord.firstFret = pressed.length ? Math.min(...pressed) : 1;
+      }
+      staff.addChord(id, chord);
+    }
+    beat.chordId = id;
+  } else beat.chordId = null;
+  if (prior && prior !== beat.chordId && prior.startsWith('chord-picker-')
+    && !staff.bars.some((bar) => bar.voices.some((voice) => voice.beats.some((b) => b.chordId === prior)))) {
+    staff.chords?.delete(prior);
   }
-  const id = `chord-${name}`;
-  if (!staff.hasChord(id)) {
-    const chord = new model.Chord();
-    chord.name = name;
-    chord.showDiagram = false;
-    chord.showFingering = false;
-    staff.addChord(id, chord);
-  }
-  beat.chordId = id;
 }
 
 export function setLyric(score: Score, c: Cursor, text: string) {

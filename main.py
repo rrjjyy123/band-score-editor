@@ -12,6 +12,12 @@ import sys
 import tempfile
 import threading
 
+# Claude 데스크톱이 `밴드악보편집기.exe --mcp`로 부르면 창을 띄우지 않고 MCP 서버(표준 입출력)로만 동작한다
+if __name__ == "__main__" and "--mcp" in sys.argv:
+    import mcp_stdio
+
+    sys.exit(mcp_stdio.run())
+
 
 def unblock_downloaded_files():
     """인터넷에서 받은 zip을 탐색기로 풀면 파일마다 '인터넷에서 받음' 표시(Zone.Identifier 스트림)가 붙는다.
@@ -88,6 +94,7 @@ SAVE_TYPES = {
     "gp": ("Guitar Pro 7 (*.gp)",),
     "musicxml": ("MusicXML (*.musicxml)",),
     "mid": ("MIDI (*.mid)",),
+    "png": ("그림 (*.png)",),
 }
 RECENT_FILE = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "band-score", "recent.json")
 RECENT_MAX = 10
@@ -367,11 +374,27 @@ class Api:
         base = os.path.join(resource_dir(), "mcp")
         mcpb = os.path.join(base, "band-score.mcpb")
         server = os.path.join(base, "server", "index.mjs")
+        import mcp_stdio
+
         return {
             "mcpb": mcpb if os.path.isfile(mcpb) else None,
             "server": server if os.path.isfile(server) else None,
             "node": shutil.which("node"),
+            # Node 없이 exe가 직접 MCP 서버가 되는 명령 (Claude Code: claude mcp add band-score -- <command> <args>)
+            "command": mcp_stdio.server_command(),
         }
+
+    def claude_status(self):
+        """Claude 데스크톱 설정에 이 편집기가 등록돼 있는지"""
+        import mcp_stdio
+
+        return mcp_stdio.claude_desktop_status()
+
+    def install_claude(self):
+        """Claude 데스크톱 설정에 이 편집기를 등록한다 (Node·터미널 없이, 다시 켜면 연결됨)"""
+        import mcp_stdio
+
+        return mcp_stdio.install_claude_desktop()
 
     def open_path_in_shell(self, path):
         """파일을 연결 프로그램으로 연다 (.mcpb → Claude 데스크톱 설치 창)"""

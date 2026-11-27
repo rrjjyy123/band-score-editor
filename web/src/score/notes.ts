@@ -65,8 +65,8 @@ export function refretBeat(beat: Beat, newPitches: number[], near: number | null
 }
 
 /** 한 음을 가장 낮은 프렛 위치에 둔다 (새로 넣을 때) */
-export function bestFretFor(staff: Staff, pitch: number, preferString?: number): Fret | null {
-  const pos = positionsFor(pitch, staff.tuning);
+export function bestFretFor(staff: Staff, pitch: number, preferString?: number, used?: Set<number>): Fret | null {
+  const pos = positionsFor(pitch, staff.tuning).filter((p) => !used?.has(p.string));
   if (pos.length === 0) return null;
   const onPreferred = pos.find((p) => p.string === preferString);
   if (onPreferred) return onPreferred;

@@ -8,22 +8,18 @@ Claude 데스크톱이 설치 창을 띄운다. Claude 데스크톱에 Node가 �
 
 import json
 import os
-import re
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVER = os.path.join(HERE, "server", "index.mjs")
+TOOLS = os.path.join(HERE, "server", "tools.json")
 OUT_DIR = os.path.join(HERE, "dist")
 
 
 def tools_from_server():
-    """서버 파일의 도구 이름·설명을 그대로 manifest에 옮긴다 (두 곳을 따로 고치지 않게)"""
-    src = open(SERVER, encoding="utf-8").read()
-    version = re.search(r"const VERSION = '([^']+)'", src).group(1)
-    tools = []
-    for m in re.finditer(r"name: '([a-z_]+)',\s*description:\s*(?:\n\s*)?'((?:[^'\\]|\\.)*)'", src):
-        tools.append({"name": m.group(1), "description": m.group(2).replace("\\'", "'").replace("\\\\n", "\\n")})
-    return version, tools
+    """도구 이름·설명을 tools.json에서 manifest로 옮긴다 (Node 서버·exe 안 Python 서버와 같은 목록)"""
+    data = json.load(open(TOOLS, encoding="utf-8"))
+    return data["VERSION"], [{"name": t["name"], "description": t["description"]} for t in data["TOOLS"]]
 
 
 def main():
@@ -53,6 +49,7 @@ def main():
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         z.write(SERVER, "server/index.mjs")
+        z.write(TOOLS, "server/tools.json")
     print(out, f"(도구 {len(tools)}개, v{version})")
 
 

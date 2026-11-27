@@ -601,6 +601,34 @@ export function setBarsPerLine(score: Score, n: number) {
   }
 }
 
+/**
+ * 원본 줄바꿈 중 유난히 긴 줄(인식이 끝쪽 줄바꿈을 못 찾아 남은 마디가 한 줄로 몰린 것 등)을 다른 줄과 비슷한 길이로 나눈다.
+ * 한 줄만 길어도 '고르게'가 화면에 안 맞아 곡 전체가 '내용에 맞춰'로 바뀌던 것을 막는다. 바꿨으면 true
+ */
+export function splitLongSystems(score: Score): boolean {
+  const fix = (layout: number[]): number[] | null => {
+    if (layout.length < 3) return null;
+    const sorted = [...layout].sort((a, b) => a - b);
+    const med = sorted[Math.floor(sorted.length / 2)];
+    const limit = Math.max(med + 2, Math.ceil(med * 1.5));
+    if (!layout.some((n) => n > limit)) return null;
+    return layout.flatMap((n) => {
+      if (n <= limit) return [n];
+      const parts = Math.ceil(n / med);
+      const base = Math.floor(n / parts);
+      return Array.from({ length: parts }, (_, i) => base + (i < n % parts ? 1 : 0));
+    });
+  };
+  let changed = false;
+  const s = fix(score.systemsLayout);
+  if (s) (score.systemsLayout = s), (changed = true);
+  for (const t of score.tracks) {
+    const f = fix(t.systemsLayout);
+    if (f) (t.systemsLayout = f), (changed = true);
+  }
+  return changed;
+}
+
 /** 한 줄에 놓이는 마디 수의 가장 큰 값(줄바꿈 정보 + 기본값) */
 export function maxBarsPerLine(score: Score): number {
   return Math.max(score.defaultSystemsLayout, ...score.systemsLayout, 1);
@@ -1140,6 +1168,24 @@ export interface AssembleReport {
     /** 다시 접은 구간 (펼친 악보 기준 마디, 0부터) */
     folded: FoldReport['repeats'];
   };
+  /**
+   * 총보 트랙마다 어느 파트 파일(parts의 순번)에서 왔는지와, 총보 마디(0부터) → 그 파트 파일의 원래 마디 순번(없으면 null).
+   * 원본 보기에서 파트 PDF의 단 위치를 총보 마디로 옮길 때 쓴다 (도돌이 펼치기·곡 구조 맞추기·다시 접기를 모두 거친 대응)
+   */
+  trackOrigins: { part: number; bars: (number | null)[] }[];
+}
+
+/** 접은 악보의 마디 i가 펼친 악보의 몇 번째 마디였는지 (foldRepeats와 같은 순서로) */
+export function foldedToUnfolded(n: number, repeats: FoldReport['repeats']): number[] {
+  const keep: number[] = [];
+  for (let i = 0; i < n; ) {
+    const r = repeats.find((x) => x.start === i);
+    if (r) {
+      for (let k = 0; k < r.length; k++) keep.push(i + k);
+      i += r.length * r.times;
+    } else keep.push(i++);
+  }
+  return keep;
 }
 
 /** 곡 처음 빠르기 (인식 프로그램은 빠르기 글자를 못 읽어 120으로 둔다) */
@@ -1231,14 +1277,25 @@ export function assembleBand(
   opts: { fold?: boolean; maps?: Record<string, (number | null)[]> } = {},
 ): { score: Score; unfolded: Score; report: AssembleReport } {
   const order: PartRole[] = ['vocal', 'guitar', 'bass', 'keys', 'drums'];
-  const sorted = [...parts].sort((a, b) => order.indexOf(a.role) - order.indexOf(b.role));
-  const report: AssembleReport = { bars: {}, dropped: [], outOfRange: 0, aligned: [], tabRead: [], form: { reference: '', labels: [], parts: [], folded: [] } };
+  // 정렬한 파트가 parts의 몇 번째였는지 (원본 보기에서 트랙마다 그 파트 파일을 붙이려고)
+  const sortedIdx = parts.map((_, i) => i).sort((a, b) => order.indexOf(parts[a].role) - order.indexOf(parts[b].role));
+  const sorted = sortedIdx.map((i) => parts[i]);
+  const report: AssembleReport = {
+    bars: {},
+    dropped: [],
+    outOfRange: 0,
+    aligned: [],
+    tabRead: [],
+    form: { reference: '', labels: [], parts: [], folded: [] },
+    trackOrigins: [],
+  };
   const tidied = sorted.map((p) => {
     const s = cloneScore(p.score, settings);
     // 줄·프렛 채우기는 보컬 줄을 가려낸 뒤에 한다 (clearVocalCopies는 프렛 없는 마디만 지운다)
     report.dropped.push(...tidyRecognized(s, { frets: false }));
     // 도돌이표·괄호는 연주 순서대로 펼친다 (파트마다 도돌이를 쓰는 곳이 달라서)
-    return { ...p, score: unfoldRepeats(cloneScore(s, settings), settings).score };
+    const u = unfoldRepeats(cloneScore(s, settings), settings);
+    return { ...p, score: u.score, origin: u.source as (number | null)[] };
   });
   // 곡 구조 맞추기: 가사·코드가 가장 많은 파트를 기준으로, 나머지 파트의 마디를 기준 마디 자리에 놓는다
   const features = tidied.map((p) => barFeatures(p.score));
@@ -1292,15 +1349,18 @@ export function assembleBand(
     report.form.parts.push({ name, unfolded: p.score.masterBars.length, ...a, applied });
     if (!applied) return p;
     formAligned.add(i);
-    return { ...p, score: rearrange(p.score, a.map, settings) };
+    return { ...p, score: rearrange(p.score, a.map, settings), origin: a.map.map((j) => (j === null ? null : (p.origin[j] ?? null))) };
   });
   const vocalScore = prepared.find((p) => p.role === 'vocal')?.score ?? null;
   const vocal = vocalScore?.tracks[0] ?? null;
   let result: Score | null = null;
   // 보컬 악보가 없을 때 기타·베이스 악보에 같이 실린 보컬 줄을 보컬 트랙으로 쓴다
   let promotedVocal: Score | null = null;
+  /** 보컬로 올린 줄이 온 파트 */
+  let promotedOrigin: AssembleReport['trackOrigins'][number] | null = null;
   for (const [pi, p] of prepared.entries()) {
     let s = p.score;
+    let origin = p.origin;
     let keep = s.tracks.map((t) => t.index);
     // 기타·베이스·키보드 악보에 같이 실린 보컬 줄을 찾아 보컬 악보와 마디를 맞추고, 그 줄은 뺀다
     if (p.role !== 'vocal' && vocal && vocalScore && s.tracks.length > 1) {
@@ -1313,6 +1373,7 @@ export function assembleBand(
         const shifted = agree && !formAligned.has(pi) && (best.a.map.some((src, i) => src !== i) || s.masterBars.length !== vocalScore.masterBars.length);
         if (shifted) {
           remapBars(s, best.a.map, vocalScore);
+          origin = best.a.map.map((j) => (j === null ? null : (origin[j] ?? null)));
           s = cloneScore(s, settings);
           report.aligned.push(ROLE_NAMES[p.role]);
         }
@@ -1329,6 +1390,7 @@ export function assembleBand(
         const v = vocalLike.reduce((a, b) => (noteCount(s.tracks[b]) > noteCount(s.tracks[a]) ? b : a));
         if (!promotedVocal) {
           promotedVocal = extractTracks(s, [v], settings);
+          promotedOrigin = { part: sortedIdx[pi], bars: origin };
           report.dropped.push(`(보컬 악보가 없어 ${ROLE_NAMES[p.role]} 악보의 보컬 줄을 보컬 트랙으로 씀)`);
         } else report.dropped.push(`${ROLE_NAMES[p.role]} 악보의 보컬 줄`);
         keep = keep.filter((i) => !vocalLike.includes(i));
@@ -1394,6 +1456,7 @@ export function assembleBand(
       track.name = name;
       const ready = cloneScore(part, settings);
       report.bars[name] = ready.masterBars.length;
+      report.trackOrigins.push({ part: sortedIdx[pi], bars: origin });
       if (!result) {
         result = ready;
         result.title = title;
@@ -1414,16 +1477,25 @@ export function assembleBand(
     result = mergeTracks(result, ready, [0], settings).score;
     // 보컬은 맨 위에
     moveTrack(result, result.tracks.length - 1, -(result.tracks.length - 1));
+    if (promotedOrigin) report.trackOrigins.unshift(promotedOrigin);
     clearInstrumentAutomations(result);
     result = cloneScore(result, settings);
   }
   assignChannels(result);
   if (tempo) setTempo(result, tempo);
   const unfolded = cloneScore(result, settings);
-  if (opts.fold === false) return { score: unfolded, unfolded, report };
+  // 총보 마디 수에 맞춘다 (짧은 파트는 뒤가 빈 마디)
+  const fit = (bars: (number | null)[], keep: number[]) => keep.map((u) => bars[u] ?? null);
+  const all = [...Array(unfolded.masterBars.length).keys()];
+  if (opts.fold === false) {
+    report.trackOrigins = report.trackOrigins.map((o) => ({ ...o, bars: fit(o.bars, all) }));
+    return { score: unfolded, unfolded, report };
+  }
   // 모든 파트가 똑같이 되풀이하는 곳만 도돌이표로 다시 접는다
   const folded = foldRepeats(unfolded, settings);
   report.form.folded = folded.report.repeats;
+  const keep = foldedToUnfolded(unfolded.masterBars.length, folded.report.repeats);
+  report.trackOrigins = report.trackOrigins.map((o) => ({ ...o, bars: fit(o.bars, keep) }));
   return { score: folded.score, unfolded, report };
 }
 

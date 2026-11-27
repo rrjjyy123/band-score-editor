@@ -26,6 +26,22 @@ export const DRUM_KIT = [
 
 const kit = (key: string) => DRUM_KIT.findIndex((d) => d.key === key);
 
+const LINE_KITS = ['K', 'S', 'H', 'C', 'R', 'T', 'M', 'J', 'F'].map(kit);
+
+export function drumKitAtLine(line: number): number {
+  const library = articulationLibrary();
+  return LINE_KITS.reduce((best, next) =>
+    Math.abs(library[next].staffLine - line) < Math.abs(library[best].staffLine - line) ? next : best,
+  );
+}
+
+export function drumNotePreview(index: number, duration: model.Duration) {
+  const a = articulationLibrary()[index];
+  const head = duration === model.Duration.Whole ? a.noteHeadWhole
+    : duration === model.Duration.Half ? a.noteHeadHalf : a.noteHeadDefault;
+  return { line: a.staffLine, head: head > 0 ? head : a.noteHeadDefault };
+}
+
 let library: model.InstrumentArticulation[] | null = null;
 
 /** alphaTab 내부 드럼 정의를 alphaTex로 한 번 만들어서 꺼내 둔다 */

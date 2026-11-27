@@ -31,6 +31,7 @@
             <button data-cmd="transpose">조바꿈…</button>
             <button data-cmd="repeat">반복 기호 (도돌이표·D.S.·Coda)…</button>
             <button data-cmd="meter" title="커서가 있는 마디부터 박자표나 빠르기를 바꿉니다">박자표·빠르기 바꾸기 (이 마디부터)…</button>
+            <button data-cmd="ink-train" title="숫자 0~9를 내 글씨로 두 번씩 써 두면 필기 인식이 더 정확해집니다">내 글씨 익히기 (필기 인식)…</button>
             <button data-cmd="guess-chords" title="코드 이름이 없는 마디에 악보의 음으로 짐작한 코드 이름을 적습니다">코드 이름 추정해 적기…</button>
             <hr />
             <button data-cmd="bar-width-even" title="한 줄의 마디를 같은 너비로 (마디마다 넓게·좁게 조절 가능)">마디 너비: 고르게</button>
@@ -73,14 +74,34 @@
       <div class="file-name" id="fileName"></div>
     </header>
 
-    <div class="palette" id="palette"></div>
+    <div>
+      <div class="palette" id="palette"></div>
+      <div id="paletteTooltip" role="tooltip" hidden></div>
+      <div class="ink-options" id="inkOptions" hidden>
+        <span>오선 음표·4분쉼표 · TAB 프렛 숫자 · 음표 머리를 긁어 지우기</span>
+        <label>변환 대기
+          <select id="inkDelay">
+            <option value="450">0.45초</option>
+            <option value="650">0.65초</option>
+            <option value="1000">1초</option>
+            <option value="1500">1.5초</option>
+            <option value="2500">2.5초</option>
+          </select>
+        </label>
+        <button id="inkConvert" type="button" title="모은 획을 즉시 변환 (Enter)" disabled>변환</button>
+      </div>
+    </div>
 
     <main class="workspace">
       <aside class="tracks" id="tracks"></aside>
+      <div class="tracks-split" id="tracksSplit" title="끌어서 파트 창 너비 바꾸기 · 두 번 누르면 접기/펴기">
+        <button id="tracksFold" title="파트 창 접기/펴기" aria-label="파트 창 접기/펴기"></button>
+      </div>
       <section class="viewport" id="viewport">
         <div class="score-wrap">
           <div id="score"></div>
           <div id="cursor" class="edit-cursor" hidden></div>
+          <span id="entryGuide" class="entry-guide" aria-hidden="true" hidden><span class="entry-glyph"></span><span class="entry-label"></span></span>
         </div>
       </section>
       <aside class="source" id="source" hidden>
@@ -88,6 +109,7 @@
           <b id="sourceName">원본</b>
           <span class="hint">줄을 누르면 그 마디로 이동</span>
           <span class="grow"></span>
+          <button id="sourcePick" title="이 트랙(또는 모든 트랙)의 원본 PDF·사진을 다른 파일로 고릅니다">다른 원본…</button>
           <button id="sourceZoomOut" title="원본 작게">−</button>
           <button id="sourceZoomIn" title="원본 크게">+</button>
           <button id="sourceClose" title="원본 닫기">✕</button>
