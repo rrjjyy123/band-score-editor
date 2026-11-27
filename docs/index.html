@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>밴드 악보 편집기 사용 설명</title>
+    <meta name="description" content="PDF 악보를 편집 가능한 악보로 바꾸고, Claude 같은 AI와 함께 고치는 Windows 프로그램 '밴드 악보 편집기' 사용 설명." />
+    <meta property="og:title" content="밴드 악보 편집기 사용 설명" />
+    <meta property="og:description" content="PDF 악보를 편집 가능한 악보로, AI와 함께 고치기. 내려받기부터 밴드 총보까지." />
+    <meta property="og:image" content="./img/editor.webp" />
+    <meta name="theme-color" content="#f6f7fb" />
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">본문으로 건너뛰기</a>
+    <header class="top">
+      <div class="top-in">
+        <a class="logo" href="#top"><span class="mark" aria-hidden="true">♩</span>밴드 악보 편집기 <small>사용 설명</small></a>
+        <nav class="top-links" aria-label="바깥 링크">
+          <a href="https://band-ensemble.web.app/intro/">합주 연습 앱</a>
+          <a href="https://github.com/rrjjyy123/band-score-editor">GitHub</a>
+          <a class="btn primary sm" data-download href="https://github.com/rrjjyy123/band-score-editor/releases/latest">내려받기</a>
+        </nav>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav class="toc" aria-label="목차">
+        <p class="toc-title">목차</p>
+        <a href="#install">1. 내려받고 실행하기</a>
+        <a href="#pdf">2. PDF 악보 바꾸기</a>
+        <a href="#ai">3. Claude(AI)로 고치기</a>
+        <a href="#edit">4. 편집 기본</a>
+        <a href="#band">5. 밴드 총보·저장·올리기</a>
+        <a href="#keys">6. 자주 쓰는 단축키</a>
+        <a href="#trouble">7. 문제 해결</a>
+      </nav>
+
+      <main id="main">
+        <section class="hero" id="top">
+          <p class="eyebrow">Windows 10·11 · 무료 · 설치 없이 실행</p>
+          <h1>PDF 악보를<br />고칠 수 있는 악보로</h1>
+          <p class="lead">밴드 악보 편집기는 가지고 있는 PDF 악보를 읽어 음표·TAB·가사·코드를 편집 가능한 악보로 바꿔요. 틀린 곳은 Claude 같은 AI에게 원본과 비교해 고쳐 달라고 맡기고, 파트별 악보는 밴드 총보 하나로 합쳐요.</p>
+          <div class="cta">
+            <a class="btn primary lg" data-download href="https://github.com/rrjjyy123/band-score-editor/releases/latest">
+              <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14" /></svg>최신 버전 내려받기
+            </a>
+            <a class="btn ghost lg" href="#install">처음이라면 여기부터</a>
+          </div>
+          <p class="meta" id="dlMeta">zip 파일 · 압축을 풀고 exe를 실행하면 돼요</p>
+          <figure class="shot"><img src="./img/editor.webp" alt="밴드 악보 편집기 화면: 왼쪽 파트 목록, 가운데 기타·베이스·키보드·드럼 악보와 TAB" width="1440" height="860" /></figure>
+        </section>
+
+        <section class="sec" id="install">
+          <p class="kicker">1</p>
+          <h2>내려받고 실행하기</h2>
+          <ol class="steps">
+            <li><b>zip 내려받기</b><span>위의 <a data-download href="https://github.com/rrjjyy123/band-score-editor/releases/latest">내려받기</a>를 누르면 <code>BandScoreEditor-…-win64.zip</code>(약 250MB)을 받아요.</span></li>
+            <li><b>끝까지 압축 풀기</b><span>zip 파일을 마우스 오른쪽 단추로 눌러 <b>모두 압축 풀기</b>를 고르고, 진행 창이 <b>다 사라질 때까지</b> 기다려요(1~2분). <code>C:\밴드악보편집기</code>처럼 짧은 곳에 풀면 좋아요.</span></li>
+            <li><b>exe 실행</b><span>풀린 <code>밴드악보편집기</code> 폴더 안의 <code>밴드악보편집기.exe</code>를 두 번 눌러요. 설치는 필요 없어요. 바탕 화면에 바로 가기를 만들어 두면 편해요.</span></li>
+          </ol>
+          <div class="callout warn">
+            <b>파란 “Windows의 PC 보호” 창이 뜨면</b>
+            <p><b>추가 정보</b>를 누르고 <b>실행</b>을 누르세요. 개인이 만든 프로그램이라 코드 서명이 없어서 뜨는 경고예요. 한 번 실행하면 다음부터는 뜨지 않아요.</p>
+          </div>
+          <div class="callout">
+            <b>zip 안에서 바로 실행하지 마세요</b>
+            <p>압축을 다 풀기 전에 exe를 누르면 <code>Cannot find Microsoft.Web.WebView2.Core.dll</code> 같은 오류가 날 수 있어요. 압축 풀기가 끝난 폴더에서 실행하면 돼요. <code>_internal</code> 폴더는 exe 옆에 그대로 두세요.</p>
+          </div>
+        </section>
+
+        <section class="sec" id="pdf">
+          <p class="kicker">2</p>
+          <h2>PDF 악보를 편집 가능한 악보로</h2>
+          <p>메뉴 <b>파일 ▸ 열기</b>에서 PDF나 악보 사진(PNG·JPG)을 고르면 인식해서 악보로 열어요. Guitar Pro(.gp), MusicXML, 이 프로그램 파일(.bscore)은 그대로 열려요.</p>
+          <div class="cards two">
+            <article class="card"><span class="tag indigo">1초 안팎</span><h3>Finale로 만든 PDF</h3><p>글자와 선이 그대로 들어 있는 PDF(구입한 악보 PDF에 많아요)는 PDF 안의 음표·TAB 숫자·가사·코드·도돌이표를 바로 읽어서 원본과 거의 같게 나와요.</p></article>
+            <article class="card"><span class="tag orange">곡당 1~5분</span><h3>스캔·사진 PDF</h3><p>그림으로 된 PDF는 악보 인식 엔진(Audiveris)으로 읽어요. 기타·베이스 TAB은 원본의 줄·프렛을 그대로 읽지만, 틀린 곳은 고쳐야 해요. 인식 중에 <b>취소</b>할 수 있어요.</p></article>
+          </div>
+          <h3 class="sub">인식한 뒤 확인하기</h3>
+          <ul class="checks">
+            <li><b>원본 보기 (F6)</b>: 원본 PDF를 오른쪽에 나란히 띄워요. 커서가 있는 줄이 원본에 표시되고, 원본의 줄을 누르면 그 마디로 가요.</li>
+            <li><b>틀린 마디</b>: 박자가 안 맞는 마디에는 빨간 밑줄이 생겨요. <kbd>F8</kbd> 다음 문제 마디, <kbd>F9</kbd> 자동 맞춤(모자라면 쉼표를 채워요).</li>
+            <li><b>자동 정리 되돌리기</b>: 인식 뒤 자동으로 정리한 것은 인식 완료 창에 목록으로 나오고, <kbd>Ctrl</kbd>+<kbd>Z</kbd> 한 번이면 정리 전으로 돌아가요.</li>
+            <li>TAB이 없는 악보는 트랙 <b>⋯ ▸ 악기</b>에서 기타·베이스로 바꾸면 TAB이 자동으로 생겨요.</li>
+          </ul>
+        </section>
+
+        <section class="sec" id="ai">
+          <p class="kicker">3</p>
+          <h2>Claude(AI)와 함께 고치기</h2>
+          <p>Claude 데스크톱 앱을 연결하면, 말로 부탁해서 악보를 고칠 수 있어요. Claude가 원본 그림을 보고 마디를 읽고 고치며, 바뀐 내용은 편집기 화면에 바로 보여요.</p>
+          <ol class="steps">
+            <li><b>연결하기 (처음 한 번)</b><span>메뉴 <b>파일 ▸ Claude(AI) 연결하기…</b>에서 <b>Claude 데스크톱에 연결</b>을 누르세요. Node 같은 다른 프로그램은 필요 없어요.</span></li>
+            <li><b>Claude 데스크톱 다시 켜기</b><span>Claude 데스크톱을 <b>완전히 종료했다가 다시 켜면</b> 연결돼요(작업 표시줄 아이콘까지 끄기).</span></li>
+            <li><b>부탁하기</b><span>편집기에 악보를 열어 둔 채 Claude에게 말해요. 마음에 안 들면 편집기에서 <kbd>Ctrl</kbd>+<kbd>Z</kbd>로 되돌려요.</span></li>
+          </ol>
+          <div class="chat" aria-label="부탁 예시">
+            <p class="me">열린 악보를 원본과 비교해서 61마디부터 고쳐 줘</p>
+            <p class="me">기타 1 트랙의 박자 안 맞는 마디를 원본대로 고쳐 줘</p>
+            <p class="me">드럼 9~16마디를 원본 그림과 비교해서 고쳐 줘</p>
+          </div>
+          <p class="note">원본을 볼 때 악보 그림이 Claude로 전송돼요. Claude Code를 쓴다면 연결 창의 안내대로 명령 한 줄로 연결할 수 있어요.</p>
+        </section>
+
+        <section class="sec" id="edit">
+          <p class="kicker">4</p>
+          <h2>편집 기본</h2>
+          <div class="cards two">
+            <article class="card"><h3>음표·쉼표·지우개 도구</h3><p>입력 막대에서 <b>음표</b>(또는 쉼표)를 고르고 오선을 누르면 그 자리에 바로 들어가요. 같은 도구를 한 번 더 누르면 길이를 골라요. 음표 위치를 누르면 화음에 더하고, 음표 사이를 누르면 박자를 끼워 넣어요.</p></article>
+            <article class="card"><h3>키보드로 빠르게</h3><p>TAB에서는 숫자로 프렛(12는 1, 2를 빠르게), 키보드·보컬 오선에서는 <kbd>A</kbd>~<kbd>G</kbd>로 음을 넣어요. <kbd>←</kbd><kbd>→</kbd> 박자, <kbd>↑</kbd><kbd>↓</kbd> 줄 이동.</p></article>
+          </div>
+          <figure class="shot"><img src="./img/pen.webp" alt="필기 모드에서 기타 TAB 줄 위에 펜으로 숫자 7을 쓰는 모습" width="1440" height="560" loading="lazy" /><figcaption>펜 필기: TAB 줄 위에 숫자를 쓰면 그 줄의 프렛이 돼요.</figcaption></figure>
+          <ul class="checks">
+            <li><b>펜 필기 (✎ 필기)</b>: 태블릿 펜을 화면에 대면 저절로 켜져요. TAB 줄에는 프렛 숫자, 오선에는 음표 머리와 기둥(온·2분·4분·8분음표)과 4분쉼표를 써요. 좌우로 긁으면 지우기, 손가락은 스크롤이에요.</li>
+            <li><b>내 글씨 익히기</b>: <b>악보 ▸ 내 글씨 익히기</b>에서 0~9를 두 번씩 써 두면 내 글씨로 비교해서 훨씬 정확해져요.</li>
+            <li><b>코드</b>: 입력 막대 <b>코드</b>에서 근음·종류·베이스를 골라 넣고, 기타는 운지표도 같이 보여 줄 수 있어요.</li>
+            <li><b>트랙</b>: <b>트랙 ▸ 새 트랙 추가</b>에서 보컬·멜로디, 기타, 베이스, 키보드, 드럼. 트랙 <b>⋯</b>에서 악기·튜닝·카포·화음 나누기·따로 저장.</li>
+            <li><b>악보 메뉴</b>: 조바꿈, 반복 기호(도돌이표·D.S.·Coda), 박자표·빠르기 바꾸기, 코드 이름 추정해 적기, 마디 너비.</li>
+          </ul>
+          <figure class="shot small"><img src="./img/add-track.webp" alt="새 트랙 추가 창: 보컬·멜로디, 기타(리드), 기타(리듬), 베이스, 키보드, 드럼 중 고르기" width="680" height="405" loading="lazy" /></figure>
+        </section>
+
+        <section class="sec" id="band">
+          <p class="kicker">5</p>
+          <h2>밴드 총보 만들고, 저장하고, 올리기</h2>
+          <ul class="checks">
+            <li><b>밴드 총보 만들기</b>: 메뉴 <b>악보 ▸ 밴드 총보 만들기</b>에서 파트별 악보(보컬·기타·베이스·키보드·드럼 PDF나 파일)를 고르면 총보 하나로 합쳐요. 도돌이표 구조가 파트마다 달라도 마디를 맞춰요. 창 위로 파일 여러 개를 끌어다 놓아도 돼요.</li>
+            <li><b>저장</b>: <kbd>Ctrl</kbd>+<kbd>S</kbd>는 이 프로그램 파일(.bscore). 원본 PDF 위치까지 기억해서 다시 열어도 원본 보기가 돼요. 저장 중 꺼져도 기존 파일이 남고, 덮어쓰기 전 내용은 <code>.bscore.bak</code>에 한 벌 남아요.</li>
+            <li><b>다른 이름으로 저장</b>: Guitar Pro 7(.gp), MusicXML(MuseScore 등), MIDI, 그림(PNG). <b>인쇄/파트보</b>에서 프린터를 <i>Microsoft Print to PDF</i>로 고르면 PDF로 저장돼요.</li>
+            <li><b>재생</b>: 트랙마다 음소거·혼자 듣기·음량, 빠르기, 구간 반복, 메트로놈. <kbd>Space</kbd>로 커서 위치부터 재생해요.</li>
+          </ul>
+          <div class="callout ok">
+            <b>밴드부와 같이 연습하려면</b>
+            <p>저장한 .bscore를 <a href="https://band-ensemble.web.app/intro/">밴드부 합주 연습</a> 앱에 끌어다 놓으면, 학생들이 코드 하나로 태블릿·폰에서 바로 보고 연습해요.</p>
+          </div>
+        </section>
+
+        <section class="sec" id="keys">
+          <p class="kicker">6</p>
+          <h2>자주 쓰는 단축키</h2>
+          <p>편집기의 <b>?</b> 단추에서 전체 목록을 볼 수 있어요.</p>
+          <div class="table-wrap">
+            <table>
+              <tbody>
+                <tr><th><kbd>←</kbd> <kbd>→</kbd></th><td>앞·뒤 박자 (끝에서 →를 누르면 박자·마디가 새로 생김)</td></tr>
+                <tr><th><kbd>↑</kbd> <kbd>↓</kbd></th><td>TAB: 줄 이동 / 키보드: 반음 올리고 내리기</td></tr>
+                <tr><th><kbd>0</kbd>~<kbd>24</kbd></th><td>TAB 프렛 입력</td></tr>
+                <tr><th><kbd>A</kbd>~<kbd>G</kbd></th><td>오선에 음 입력 (Shift를 누르면 화음에 더하기)</td></tr>
+                <tr><th><kbd>+</kbd> <kbd>-</kbd> <kbd>.</kbd> <kbd>/</kbd></th><td>음 길이 짧게·길게 / 점음표 / 셋잇단음표</td></tr>
+                <tr><th><kbd>R</kbd> · <kbd>Delete</kbd></th><td>쉼표로 바꾸기 · 커서의 음 지우기</td></tr>
+                <tr><th><kbd>F6</kbd> <kbd>F8</kbd> <kbd>F9</kbd></th><td>원본 보기 · 다음 문제 마디 · 박자 자동 맞춤</td></tr>
+                <tr><th><kbd>Space</kbd></th><td>재생 / 멈춤</td></tr>
+                <tr><th><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd></th><td>실행 취소 / 다시 실행</td></tr>
+                <tr><th><kbd>Ctrl</kbd>+<kbd>C</kbd> <kbd>V</kbd></th><td>마디 복사·붙여넣기 (Ctrl+Shift+V는 끼워 붙이기)</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="sec" id="trouble">
+          <p class="kicker">7</p>
+          <h2>문제 해결</h2>
+          <div class="faq">
+            <details open>
+              <summary>“Cannot find Microsoft.Web.WebView2.Core.dll” 오류가 떠요</summary>
+              <p>압축이 다 풀리기 전에(또는 zip 안에서 바로) exe를 실행한 경우예요. zip을 <b>모두 압축 풀기</b>로 끝까지 푼 다음, 풀린 폴더의 exe를 다시 실행하세요.</p>
+            </details>
+            <details>
+              <summary>파란 “Windows의 PC 보호” 창이 떠요</summary>
+              <p><b>추가 정보 ▸ 실행</b>을 누르세요. 코드 서명이 없는 프로그램이라 뜨는 경고예요.</p>
+            </details>
+            <details>
+              <summary>“WebView2 런타임이 없습니다” 안내가 떠요</summary>
+              <p>오래된 Windows 10에는 화면을 그리는 Microsoft Edge WebView2 런타임이 없을 수 있어요. 안내대로 설치한 뒤 다시 실행하세요. Windows 11에는 기본으로 들어 있어요.</p>
+            </details>
+            <details>
+              <summary>“Python.Runtime.dll” 오류 창이 떠요</summary>
+              <p>예전 버전(v1.0.0)에서 생기던 문제예요. 최신 버전을 받아 주세요. 계속 뜨면 zip 파일 오른쪽 클릭 ▸ 속성 ▸ <b>차단 해제</b>를 체크하고 다시 압축을 푸세요.</p>
+            </details>
+            <details>
+              <summary>인식이 오래 걸리거나 결과가 이상해요</summary>
+              <p>스캔·사진 PDF는 곡당 몇 분 걸려요. 해상도가 낮거나 기울어진 사진은 틀린 곳이 많아요. 원본 보기(F6)로 대조하면서 F8로 문제 마디를 찾아 고치거나, Claude에게 원본과 비교해 고쳐 달라고 해 보세요.</p>
+            </details>
+            <details>
+              <summary>폴더를 옮기고 싶어요</summary>
+              <p><code>밴드악보편집기</code> 폴더를 통째로 옮기세요. exe만 따로 옮기면 실행되지 않아요.</p>
+            </details>
+          </div>
+        </section>
+
+        <footer class="foot">
+          <p>밴드 악보 편집기는 GNU AGPL-3.0으로 공개한 무료 프로그램이에요. 소스 코드: <a href="https://github.com/rrjjyy123/band-score-editor">GitHub</a></p>
+          <p>악보 파일은 들어 있지 않아요. 구입한 악보는 구입처 약관 안에서 써 주세요.</p>
+        </footer>
+      </main>
+    </div>
+
+    <script>
+      // 내려받기 단추를 최신 Release의 zip으로 바로 연결 (못 받으면 Release 페이지 그대로)
+      fetch('https://api.github.com/repos/rrjjyy123/band-score-editor/releases/latest', { headers: { Accept: 'application/vnd.github+json' } })
+        .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+        .then((rel) => {
+          const zip = (rel.assets || []).find((a) => /win64\.zip$/i.test(a.name)) || (rel.assets || []).find((a) => /\.zip$/i.test(a.name));
+          if (!zip) return;
+          document.querySelectorAll('[data-download]').forEach((a) => (a.href = zip.browser_download_url));
+          const meta = document.getElementById('dlMeta');
+          if (meta) meta.textContent = `${rel.tag_name} · zip ${Math.round(zip.size / 1048576)}MB · 압축을 풀고 exe를 실행하면 돼요`;
+        })
+        .catch(() => {});
+      // 목차: 보고 있는 구역 표시
+      const links = [...document.querySelectorAll('.toc a')];
+      const io = new IntersectionObserver((entries) => {
+        for (const e of entries) if (e.isIntersecting) links.forEach((a) => a.classList.toggle('on', a.hash === '#' + e.target.id));
+      }, { rootMargin: '-30% 0px -60% 0px' });
+      document.querySelectorAll('main section[id]').forEach((s) => io.observe(s));
+    </script>
+  </body>
+</html>

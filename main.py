@@ -69,6 +69,38 @@ def message_box(text, title="밴드 악보 편집기"):
         print(text, file=sys.stderr)
 
 
+def check_unpacked(wait_seconds=15):
+    """zip을 다 풀기 전에(또는 zip 안에서 바로) exe를 누르면 화면 부품(WebView2 DLL)이 아직 없어
+    'Cannot find Microsoft.Web.WebView2.Core.dll' 오류 창이 뜬다. 그 대신 무엇을 하면 되는지 알려 준다.
+    압축을 푸는 중일 수 있으니 잠깐 기다리며 다시 본다. 다 있으면 True"""
+    if not getattr(sys, "frozen", False) or os.name != "nt":
+        return True
+    import time
+    lib = os.path.join(sys._MEIPASS, "webview", "lib")
+    need = [os.path.join(lib, n) for n in ("Microsoft.Web.WebView2.Core.dll", "Microsoft.Web.WebView2.WinForms.dll")]
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    temp = os.path.normcase(os.path.abspath(tempfile.gettempdir()))
+    # 탐색기에서 zip을 열고 exe를 바로 누르면 %TEMP%\Temp1_<zip 이름>.zip\ 같은 곳에 일부만 풀어서 실행한다
+    in_zip = os.path.normcase(exe_dir).startswith(temp) and ".zip" in os.path.normcase(exe_dir)
+    deadline = time.time() + (0 if in_zip else wait_seconds)
+    while True:
+        if all(os.path.isfile(p) for p in need):
+            return True
+        if time.time() >= deadline:
+            break
+        time.sleep(1)
+    message_box(
+        "프로그램 파일이 다 풀리지 않았어요.\n\n"
+        + ("zip 파일 안에서 바로 실행하면 일부 파일만 풀려서 켜지지 않아요.\n" if in_zip else "")
+        + "내려받은 zip을 마우스 오른쪽 단추 ▸ '모두 압축 풀기'로 끝까지 푼 다음,\n"
+        "풀린 '밴드악보편집기' 폴더 안의 밴드악보편집기.exe를 실행해 주세요.\n\n"
+        "자세한 방법: https://rrjjyy123.github.io/band-score-editor/#install")
+    return False
+
+
+if __name__ == "__main__" and not check_unpacked():
+    sys.exit(1)
+
 import webview  # noqa: E402  (위에서 표시를 지운 뒤에 불러온다)
 from webview.dom import DOMEventHandler
 
